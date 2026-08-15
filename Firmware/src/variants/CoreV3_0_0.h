@@ -1,0 +1,50 @@
+#pragma once
+
+#define HARDWARE_VERSION "3.0.0"
+#define USE_INTERNAL_USB_CDC 1
+
+#define CORE_HAS_SCREEN 1
+#define CORE_HAS_ACCELEROMETER 1
+#define CORE_HAS_ETHERNET 1
+#define CORE_HAS_LOCAL_AUDIO_VISUAL 1
+#define CORE_HAS_LOCAL_CHANNEL_OUTPUTS 1
+#define CORE_NFC_READER_MFRC630 1
+#define CORE_MAX_CHANNELS 4
+
+#define PIN_SCREEN_4 35
+#define PIN_IODIR_1 36
+#define PIN_ETH_CS 37
+#define PIN_ETH_RST 38
+#define PIN_GPIO_2 39
+#define PIN_GPIO_1 40
+#define PIN_DEBUG_LED 41
+#define PIN_IODIR_2 42
+#define PIN_SERIAL_TX 39
+#define PIN_SERIAL_RX 40
+#define PIN_IODIR_4 45
+#define PIN_ACCESS 46
+#define PIN_SCREEN_5 48
+#define PIN_SCREEN_6 34
+#define PIN_NFC_CS 33
+#define PIN_DET_1 47
+#define PIN_DET_2 26
+#define PIN_INTERRUPT 21
+#define PIN_ONE_WIRE 18
+#define PIN_SCREEN_1 17
+#define PIN_SCREEN_2 16
+#define PIN_SCREEN_3 15
+#define PIN_ETH_INT 14
+#define PIN_SPI_SCK 13
+#define PIN_SPI_MOSI 12
+#define PIN_SPI_MISO 11
+#define PIN_GPIO_3 10
+#define PIN_SDA 9
+#define PIN_VARIANT 8
+#define PIN_LED 7
+#define PIN_IRQ 6
+#define PIN_IODIR_3 5
+#define PIN_PDWN 4
+#define PIN_SCL 3
+#define PIN_GPIO_4 2
+#define PIN_BUZZER 1
+#define PIN_BUTTON 0

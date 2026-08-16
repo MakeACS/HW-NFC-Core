@@ -11,7 +11,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     
-    # Tells all 'run' steps below to execute inside the Firmware folder
     defaults:
       run:
         working-directory: ./Firmware
@@ -37,12 +36,13 @@ jobs:
         run: |
           mkdir -p release_assets
           
-          # Initialize the base JSON structure
-          echo '{"firmwares": []}' > release_assets/manifest.json
-          
+          # GitHub Action variables for constructing the download URL and version
           REPO="${{ github.repository }}"
           TAG="${{ github.ref_name }}"
           BASE_URL="https://github.com/$REPO/releases/download/$TAG"
+          
+          # Initialize the base JSON structure using jq to safely include the version tag
+          jq -n --arg version "$TAG" '{version: $version, firmwares: []}' > release_assets/manifest.json
           
           # Loop through each generated environment directory
           for env_dir in .pio/build/*/; do
@@ -78,5 +78,4 @@ jobs:
       - name: Upload Assets to Release
         uses: softprops/action-gh-release@v2
         with:
-          # Action steps run from the repo root, so we include the Firmware directory here
           files: Firmware/release_assets/*

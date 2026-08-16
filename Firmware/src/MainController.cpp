@@ -685,6 +685,8 @@ void loop() {
         configObject["channelID"] = i;
         configObject["tempDuration"] = channels.tapDurations[i];
       }
+      //Temp disable network inteface reporting, as it is not yet implemented on the server side.
+      //outgoing["networkInterface"] = getActiveNetworkInterface();
       outgoing["inputMode"] = inputMode;
       JsonObject configDeployment = outgoing["deployment"].to<JsonObject>();
       configDeployment["SN"] = serialNumber;
@@ -765,7 +767,6 @@ void loop() {
         }
       }
       outgoing["currentCardTag"] = currentUserUid;
-      outgoing["interface"] = getActiveNetworkInterface();
       String StatusPayload;
       serializeJson(outgoing, StatusPayload);
       outgoing.clear();

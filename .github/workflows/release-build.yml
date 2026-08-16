@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,15 +38,13 @@ jobs:
         run: |
           mkdir -p release_assets
           
-          # GitHub Action variables for constructing the download URL and version
           REPO="${{ github.repository }}"
           TAG="${{ github.ref_name }}"
           BASE_URL="https://github.com/$REPO/releases/download/$TAG"
           
-          # Initialize the base JSON structure using jq to safely include the version tag
-          jq -n --arg version "$TAG" '{version: $version, firmwares: []}' > release_assets/manifest.json
+          # Initialize the base JSON structure under the new name
+          jq -n --arg version "$TAG" '{version: $version, firmwares: []}' > release_assets/OTADirectory.json
           
-          # Loop through each generated environment directory
           for env_dir in .pio/build/*/; do
             if [ -d "$env_dir" ]; then
               env_name=$(basename "$env_dir")
@@ -53,29 +53,41 @@ jobs:
                 new_name="firmware_${env_name}.bin"
                 filepath="release_assets/${new_name}"
                 
-                # Copy and rename the binary
                 cp "$env_dir/firmware.bin" "$filepath"
                 echo "Prepared ${new_name} for upload"
                 
-                # Calculate the MD5 hash
                 md5_hash=$(md5sum "$filepath" | awk '{print $1}')
-                
-                # Construct the direct download URL
                 file_url="${BASE_URL}/${new_name}"
                 
-                # Use jq to append this firmware's data into the JSON array
+                # Append this firmware's data into OTADirectory.json
                 jq --arg name "$new_name" \
                    --arg url "$file_url" \
                    --arg md5 "$md5_hash" \
                    '.firmwares += [{"name": $name, "url": $url, "md5": $md5}]' \
-                   release_assets/manifest.json > release_assets/tmp.json && mv release_assets/tmp.json release_assets/manifest.json
+                   release_assets/OTADirectory.json > release_assets/tmp.json && mv release_assets/tmp.json release_assets/OTADirectory.json
               fi
             fi
           done
           
-          cat release_assets/manifest.json
+          cat release_assets/OTADirectory.json
 
-      - name: Upload Assets to Release
+      - name: Commit and Push Manifest to Repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          git checkout main
+          
+          # Copy the newly named JSON out of the temporary folder
+          cp release_assets/OTADirectory.json ./OTADirectory.json
+          
+          # Add, commit, and push OTADirectory.json to the repo
+          git add OTADirectory.json
+          git commit -m "Update OTA manifest for release ${{ github.ref_name }} [skip ci]" || echo "No changes to commit"
+          git push origin main
+
+      - name: Upload Binaries to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: Firmware/release_assets/*
+          # ONLY upload the .bin files to the actual GitHub Release
+          files: Firmware/release_assets/*.bin

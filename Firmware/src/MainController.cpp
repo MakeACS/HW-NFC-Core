@@ -153,7 +153,6 @@ bool faultBeepRequested = 0; //We use the 3 beep normally for fault to indicate 
 int MakerspaceNumber = 36;  // number from the makerspace's URL. We need to hard-code this for now.
 
 //Variables - System channels.states
-String hardwareVersion = "0.0.0"; //Hardware version, loaded from memory for use in OTA.
 bool identifyRequested = 0; //Set to 1 to play an identification alarm/buzzer.
 String inputMode = "INSERT"; //Stores how we ingest cards.
 String defaultInputMode = "INSERT"; //Stores how we should ingest cards, when not in welcome mode.
@@ -341,13 +340,6 @@ void setup() {
     }
   }
 
-  if(!settings.isKey("hardware.ver")){
-    //hardwareVersion is new in 2.2.0, so firmware can run in similar hardware.
-    //Assume any deployed hardware is 3.0.0
-    settings.putString("hardware.ver", HARDWARE_VERSION);
-  }
-  hardwareVersion = settings.getString("hardware.ver");
-
   if(!settings.isKey("channels.count")){
     //channels.count is new in 2.1.4, set to 1 if no value
     settings.putString("channels.count", "1");
@@ -490,11 +482,13 @@ void setup() {
     //We use the same cert on our server as Github does.
     ota.SetCACert(rootCertificate.c_str());
     ota.SetCallback(handleOtaProgress);
-    ota.SetConfig(hardwareVersion.c_str()); 
-    ota.OverrideDevice("ACS Core");
+    String targetFilename = "firmware_" + String(PIOENV_NAME) + ".bin";
+    Serial.print(F("OTA Target Filename: "));
+    Serial.println(targetFilename);
+    ota.SetTargetFilename(targetFilename.c_str());
 
     // 2. Verify the current firmware can reach the JSON (or rollback)
-    const char* jsonUrl = "https://raw.githubusercontent.com/rit-construct-makerspace/access-control-firmware/refs/heads/main/otadirectory.json";
+    const char* jsonUrl = "https://raw.githubusercontent.com/MakeACS/HW-NFC-Core/main/Firmware/OTADirectory.json";
     bool isValid = ota.VerifyOrRevert(jsonUrl, FIRMWARE_VERSION);
 
     // 3. If validation succeeded, check for a new update
@@ -1661,7 +1655,6 @@ void migrateLegacySettings() {
     {"channels.count", "ChannelCount"},
     {"channels.count", "channelCount"},
     {"hardware.ver", "HWVer"},
-    {"hardware.ver", "hardwareVersion"},
     {"access.input", "InputMode"},
     {"access.input", "inputMode"},
     {"access.intResp", "IntResp"},

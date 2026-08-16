@@ -150,6 +150,7 @@ void runScreenController(void *pvParameters){
 
     //Every 10 minutes, fetch the latest announcements and hours;
     if (checkAnnouncements <= millis64()) {
+      Serial.println(F("Refreshing announcements and hours from server..."));
       if(refreshAnnouncements() && refreshHours()){
         sendDisplaychannelState(true, true);
         NextScreenUpdate = millis64() + 1000;

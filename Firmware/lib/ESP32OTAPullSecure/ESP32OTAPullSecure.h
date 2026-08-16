@@ -3,8 +3,9 @@ ESP32-OTA-Pull - a library for doing "pull" based OTA ("Over The Air") firmware
 updates, where the image updates are posted on the web.
 
 MIT License
-Copyright (c) 2022-3 Mikal Hart
-(Modified for HTTPS, Semantic Versioning, Hardware Rollback, MD5 Hashing, and ESP32 Core 3.x Support)
+Jim Heaney, 2026
+Based on 2022-3 Mikal Hart
+(Modified for HTTPS, Semantic Versioning, Hardware Rollback, MD5 Hashing, New JSON Formatting, and ESP32 Core 3.x Support)
 */
 
 #pragma once
@@ -27,9 +28,7 @@ public:
 private:
     void (*Callback)(int offset, int totallength) = NULL;
     ActionType Action = UPDATE_AND_BOOT;
-    String Board      = ARDUINO_BOARD;
-    String Device     = "";
-    String Config     = "";
+    String TargetFilename = ""; // Formerly Config
     String CVersion   = "";
     bool DowngradesAllowed = false;
     bool SerialDebug = false;
@@ -169,9 +168,10 @@ private:
 
 public:
     String GetVersion() { return CVersion; }
-    ESP32OTAPull &OverrideDevice(const char *device) { Device = device; return *this; }
-    ESP32OTAPull &OverrideBoard(const char *board) { Board = board; return *this; }
-    ESP32OTAPull &SetConfig(const char *config) { Config = config; return *this; }
+    
+    // Cleaned up unused config/device/board setters
+    ESP32OTAPull &SetTargetFilename(const char *filename) { TargetFilename = filename; return *this; }
+    
     ESP32OTAPull &AllowDowngrades(bool allow_downgrades) { DowngradesAllowed = allow_downgrades; return *this; }
     ESP32OTAPull &SetCallback(void (*callback)(int offset, int totallength)) { Callback = callback; return *this; }
     void EnableSerialDebug() { SerialDebug = true; }
@@ -181,6 +181,18 @@ public:
 
     bool VerifyOrRevert(const char* JSON_URL, const char* currentVersion)
     {
+        // --- NEW: Hardware-level check to see if verification is actually needed ---
+        esp_ota_img_states_t ota_state;
+        const esp_partition_t *running_partition = esp_ota_get_running_partition();
+        
+        if (esp_ota_get_state_partition(running_partition, &ota_state) == ESP_OK) {
+            if (ota_state != ESP_OTA_IMG_PENDING_VERIFY) {
+                if (SerialDebug) Serial.println("OTA Verification skipped: Firmware is not in a pending verification state (likely USB flash or already verified).");
+                return true; 
+            }
+        }
+        // ---------------------------------------------------------------------------
+
         uint32_t startTime = millis();
         bool success = false;
         
@@ -288,20 +300,17 @@ public:
             String badVer = prefs.getString("bad_ver", "");
             prefs.end();
 
-            String _Board    = Board.isEmpty() ? ARDUINO_BOARD : Board;
-            String _Device   = Device.isEmpty() ? WiFi.macAddress() : Device;
-            String _Config   = Config.isEmpty() ? "" : Config;
+            String _TargetName = TargetFilename.isEmpty() ? "" : TargetFilename;
 
-            for (auto config : doc["Configurations"].as<JsonArray>())
+            // Grab the global version from the root of the JSON document
+            CVersion = doc["version"].isNull() ? "" : (const char *)doc["version"];
+
+            for (auto firmware : doc["firmwares"].as<JsonArray>())
             {
-                String CBoard   = config["Board"].isNull() ? "" : (const char *)config["Board"];
-                String CDevice  = config["Device"].isNull() ? "" : (const char *)config["Device"];
-                CVersion        = config["Version"].isNull() ? "" : (const char *)config["Version"];
-                String CConfig  = config["Config"].isNull() ? "" : (const char *)config["Config"];
+                String FName = firmware["name"].isNull() ? "" : (const char *)firmware["name"];
 
-                if ((CBoard.isEmpty() || CBoard == _Board) &&
-                    (CDevice.isEmpty() || CDevice == _Device) &&
-                    (CConfig.isEmpty() || CConfig == _Config))
+                // Check for an EXACT match between the JSON name and your target name
+                if (!_TargetName.isEmpty() && FName == _TargetName)
                 {
                     foundProfile = true;
 
@@ -313,8 +322,8 @@ public:
                     int versionCmp = compareVersions(CVersion, String(CurrentVersion));
 
                     if (CVersion.isEmpty() || versionCmp > 0 || (DowngradesAllowed && versionCmp != 0)) {
-                        targetURL = (const char *)config["URL"];
-                        targetMD5 = config["MD5"].isNull() ? "" : (const char *)config["MD5"];
+                        targetURL = firmware["url"].isNull() ? "" : (const char *)firmware["url"];
+                        targetMD5 = firmware["md5"].isNull() ? "" : (const char *)firmware["md5"];
                         shouldUpdate = true;
                         break; 
                     }

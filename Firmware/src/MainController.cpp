@@ -258,6 +258,8 @@ void setup() {
 #endif
 #if !CORE_HAS_LOCAL_AUDIO_VISUAL
   frontend.begin(115200, SERIAL_8N1, PIN_FRONTEND_RX, PIN_FRONTEND_TX);
+  frontend.println("B 0"); //Set buzzer to 0
+  frontend.println("L 0,0,255"); //Set LED to blue
 #endif
 
   Serial.println(F("STARTUP"));

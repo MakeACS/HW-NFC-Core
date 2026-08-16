@@ -21,5 +21,5 @@
 #define PIN_INTERRUPT 37
 #define PIN_ONE_WIRE 1
 
-#define PIN_FRONTEND_TX 19
-#define PIN_FRONTEND_RX 9
+#define PIN_FRONTEND_TX 9
+#define PIN_FRONTEND_RX 19

@@ -8,7 +8,7 @@ This task is responsible for talking with any connected screen.
 */
 
 //Print the screen payload to the debug output;
-#define PRINT_SCREEN_PAYLOAD 1
+//#define PRINT_SCREEN_PAYLOAD 
 
 #include "Globals.h"
 #include "DisplayController.h"
@@ -127,7 +127,7 @@ void sendDisplaychannelState(bool sendRarely, bool sendFrequently){
   uint32_t checksum = esp_crc32_le(0, (const uint8_t*)CurrentToSend.c_str(), CurrentToSend.length());
   CurrentStates["crc"] = checksum;
   serializeJson(CurrentStates, CurrentToSend);
-#if PRINT_SCREEN_PAYLOAD
+#ifdef PRINT_SCREEN_PAYLOAD
   Serial.print(F("Sending to screen: "));
   Serial.println(CurrentToSend);
   Serial.flush();

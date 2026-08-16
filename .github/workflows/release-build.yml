@@ -1,0 +1,82 @@
+name: Build and Upload Release Assets
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    # Tells all 'run' steps below to execute inside the Firmware folder
+    defaults:
+      run:
+        working-directory: ./Firmware
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install platformio
+
+      - name: Build All Environments
+        run: pio run
+
+      - name: Prepare Binaries and JSON Manifest
+        run: |
+          mkdir -p release_assets
+          
+          # Initialize the base JSON structure
+          echo '{"firmwares": []}' > release_assets/manifest.json
+          
+          REPO="${{ github.repository }}"
+          TAG="${{ github.ref_name }}"
+          BASE_URL="https://github.com/$REPO/releases/download/$TAG"
+          
+          # Loop through each generated environment directory
+          for env_dir in .pio/build/*/; do
+            if [ -d "$env_dir" ]; then
+              env_name=$(basename "$env_dir")
+              
+              if [ -f "$env_dir/firmware.bin" ]; then
+                new_name="firmware_${env_name}.bin"
+                filepath="release_assets/${new_name}"
+                
+                # Copy and rename the binary
+                cp "$env_dir/firmware.bin" "$filepath"
+                echo "Prepared ${new_name} for upload"
+                
+                # Calculate the MD5 hash
+                md5_hash=$(md5sum "$filepath" | awk '{print $1}')
+                
+                # Construct the direct download URL
+                file_url="${BASE_URL}/${new_name}"
+                
+                # Use jq to append this firmware's data into the JSON array
+                jq --arg name "$new_name" \
+                   --arg url "$file_url" \
+                   --arg md5 "$md5_hash" \
+                   '.firmwares += [{"name": $name, "url": $url, "md5": $md5}]' \
+                   release_assets/manifest.json > release_assets/tmp.json && mv release_assets/tmp.json release_assets/manifest.json
+              fi
+            fi
+          done
+          
+          cat release_assets/manifest.json
+
+      - name: Upload Assets to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Action steps run from the repo root, so we include the Firmware directory here
+          files: Firmware/release_assets/*

@@ -7,6 +7,9 @@ This task is responsible for talking with any connected screen.
 
 */
 
+//Print the screen payload to the debug output;
+#define PRINT_SCREEN_PAYLOAD 1
+
 #include "Globals.h"
 #include "DisplayController.h"
 #include "TaggedSerial.h"
@@ -47,7 +50,8 @@ void sendDisplaychannelState(bool sendRarely, bool sendFrequently){
       CurrentStates["WiFi-Available"] = true;
       CurrentStates["WiFi-wifiSsid"] = networkConfiguration.wifiSsid;
       CurrentStates["WiFi-wifiPassword"] = networkConfiguration.wifiPassword;
-      CurrentStates["TLS-Cert"] = rootCertificate;
+      //Temp disabled for memory overrun testing;
+      //CurrentStates["TLS-Cert"] = rootCertificate;
     } else{
       CurrentStates["WiFi-Available"] = false;
     }
@@ -123,6 +127,11 @@ void sendDisplaychannelState(bool sendRarely, bool sendFrequently){
   uint32_t checksum = esp_crc32_le(0, (const uint8_t*)CurrentToSend.c_str(), CurrentToSend.length());
   CurrentStates["crc"] = checksum;
   serializeJson(CurrentStates, CurrentToSend);
+#if PRINT_SCREEN_PAYLOAD
+  Serial.print(F("Sending to screen: "));
+  Serial.println(CurrentToSend);
+  Serial.flush();
+#endif
   Serial0.println(CurrentToSend);
   Serial0.flush();
 }

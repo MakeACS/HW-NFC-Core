@@ -306,9 +306,9 @@ void setup() {
   //Older devices use their onewire ID as a serial numer;
   if(settings.isKey("SerialNumber")){
     //Use old-style serial number
-    SerialNumber = settings.getString("SerialNumber");
+    serialNumber = settings.getString("SerialNumber");
     Serial.print(F("Loaded OneWire-based serial number: "));
-    Serial.println(SerialNumber);
+    Serial.println(serialNumber);
   } else{
     //Otherwise, get our actual hardware ID number;
 

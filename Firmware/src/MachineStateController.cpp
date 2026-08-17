@@ -10,6 +10,7 @@ TaggedSerial<decltype(::Serial)> machineStateSerial(::Serial, "[state] ");
 
 void runMachineStateLoop(void *pvParameters){
   Serial.println(F("runMachineStateLoop Started."));
+  bool retryPing = false; //Stores if we have failed 2 pings in a row.
   while(1){
     delay(50);
 
@@ -408,10 +409,21 @@ void runMachineStateLoop(void *pvParameters){
       if(mqttState.newPing){
         //We got a ping response as expected.
         mqttState.newPing = false;
+        retryPing = false;
         //Serial.println(F("Ping response OK."));
       } else{
         Serial.println(F("Didn't get a ping response?"));
-        networkState.unavailable = true;
+        if(retryPing = false){
+          //We didn't get a ping response, but we haven't retried yet. Let's retry.
+          Serial.println(F("Retrying ping."));
+          mqttState.sendPing = true;
+          retryPing = true;
+        } else{
+          //We didn't get a ping response, and we already retried. Something is wrong with the network.
+          Serial.println(F("No ping response after retry, network is unavailable."));
+          retryPing = false;
+          networkState.unavailable = true;
+        }
       }
       mqttState.sendPing = true;
     }

@@ -74,8 +74,19 @@ private:
         return 0; 
     }
 
-    int DoOTAUpdate(const char* URL, const char* expectedMD5, ActionType Action)
+int DoOTAUpdate(const char* URL, const char* expectedMD5, ActionType Action)
     {
+        // 1. SECURE THE UPDATE BUFFER FIRST (Before the TLS handshake consumes the heap)
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+            if (SerialDebug) Serial.printf("Failed to allocate Update buffer: %s\n", Update.errorString());
+            return OTA_UPDATE_FAIL;
+        }
+
+        // Enforce MD5 hash validation during the flash process
+        if (expectedMD5 != nullptr && strlen(expectedMD5) > 0) {
+            Update.setMD5(expectedMD5);
+        }
+
         HTTPClient http;
         WiFiClientSecure secureClient;
         WiFiClient client;
@@ -83,7 +94,6 @@ private:
         NetworkClient* streamClient = &client;
 
         if (String(URL).startsWith("https")) {
-            // ALWAYS force insecure for the binary download to bypass CDN redirect/SNI issues
             secureClient.setInsecure();
             secureClient.setTimeout(15); 
             streamClient = &secureClient;
@@ -98,12 +108,12 @@ private:
             }
         }
 
-        // Use HTTP/1.1 for large binary files
         http.useHTTP10(false);       
         http.begin(*streamClient, URL);
         http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS); 
         http.setTimeout(15000);
 
+        // 2. EXECUTE THE GET REQUEST (The heavy TLS allocations happen here)
         int httpResponseCode = http.GET();
 
         if (SerialDebug) {
@@ -116,15 +126,6 @@ private:
         if (httpResponseCode == 200)
         {
             int totalLength = http.getSize();
-
-            if (!Update.begin(UPDATE_SIZE_UNKNOWN))
-                return OTA_UPDATE_FAIL;
-
-            // Enforce MD5 hash validation during the flash process
-            if (expectedMD5 != nullptr && strlen(expectedMD5) > 0) {
-                Update.setMD5(expectedMD5);
-            }
-
             uint8_t buff[1280] = { 0 };
             Stream* stream = http.getStreamPtr();
 
@@ -149,7 +150,6 @@ private:
 
             if (offset == totalLength)
             {
-                // Update.end() returns false if the MD5 hash fails to match
                 if (Update.end(true)) {
                     delay(1000);
                     if (Action == UPDATE_BUT_NO_BOOT) return UPDATE_OK;
@@ -158,10 +158,15 @@ private:
                     if (SerialDebug) Serial.printf("OTA UPDATE ABORTED: MD5 Hash Mismatch! (%s)\n", Update.errorString());
                     return WRITE_ERROR;
                 }
+            } else {
+                // Make sure to abort if the connection dropped mid-download
+                Update.abort(); 
             }
             return WRITE_ERROR;
         }
 
+        // 3. ABORT UPDATE IF HTTP FAILED TO FREE THE RESERVED BUFFER
+        Update.abort(); 
         http.end();
         return httpResponseCode;
     }

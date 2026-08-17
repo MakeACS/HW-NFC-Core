@@ -12,7 +12,7 @@ More info: https://github.com/MakeACS/HW-NFC-Core
 
 */
 
-#define FIRMWARE_VERSION "3.0.2"
+#define FIRMWARE_VERSION "3.0.3"
 
 #include <Arduino.h>
 #include "Globals.h"
@@ -301,25 +301,38 @@ void setup() {
   //Load settings from memory
 
   //Get our serial number;
-  // The ID is 128 bits = 16 bytes
-  uint8_t unique_id[16]; 
-  
-  // ESP_EFUSE_OPTIONAL_UNIQUE_ID is the constant defined in the IDF table
-  esp_err_t err = esp_efuse_read_field_blob(ESP_EFUSE_OPTIONAL_UNIQUE_ID, unique_id, 128);
 
-  if (err == ESP_OK) {
-    Serial.print("Serial Number: ");
-    for (int i = 0; i < 16; i++) {
-      if (unique_id[i] < 0x10) serialNumber += "0"; // Lead with zero if byte < 16
-      serialNumber += String(unique_id[i], HEX);
+  //Older devices use their onewire ID as a serial numer;
+  if(settings.isKey("SerialNumber")){
+    //Use old-style serial number
+    SerialNumber = settings.getString("SerialNumber");
+    Serial.print(F("Loaded OneWire-based serial number: "));
+    Serial.println(SerialNumber);
+  } else{
+    //Otherwise, get our actual hardware ID number;
+
+    // The ID is 128 bits = 16 bytes
+    uint8_t unique_id[16]; 
+    
+    // ESP_EFUSE_OPTIONAL_UNIQUE_ID is the constant defined in the IDF table
+    esp_err_t err = esp_efuse_read_field_blob(ESP_EFUSE_OPTIONAL_UNIQUE_ID, unique_id, 128);
+
+    if (err == ESP_OK) {
+      Serial.print("Serial Number: ");
+      for (int i = 0; i < 16; i++) {
+        if (unique_id[i] < 0x10) serialNumber += "0"; // Lead with zero if byte < 16
+        serialNumber += String(unique_id[i], HEX);
+      }
+      serialNumber.toUpperCase();
+      Serial.print(serialNumber);
+      Serial.println();
+    } else {
+      Serial.printf("Error reading eFuse: 0x%X\n", err);
+      Serial.println("Note: This ID may not exist on original ESP32 (Non-S2/S3) models.");
     }
-    serialNumber.toUpperCase();
-    Serial.print(serialNumber);
-    Serial.println();
-  } else {
-    Serial.printf("Error reading eFuse: 0x%X\n", err);
-    Serial.println("Note: This ID may not exist on original ESP32 (Non-S2/S3) models.");
   }
+
+
 
   //Get our MAC address for printing, in V3.0.0 hardware this is our base MAC
   Serial.print(F("WiFi MAC Address: "));

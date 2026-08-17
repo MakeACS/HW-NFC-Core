@@ -1,15 +1,15 @@
 {
-  "version": "3.0.1",
+  "version": "3.0.2",
   "firmwares": [
     {
       "name": "firmware_core-v2-3-2.bin",
-      "url": "https://github.com/MakeACS/HW-NFC-Core/releases/download/3.0.1/firmware_core-v2-3-2.bin",
-      "md5": "76c0ca7602888a4b16d9094840f147eb"
+      "url": "https://github.com/MakeACS/HW-NFC-Core/releases/download/3.0.2/firmware_core-v2-3-2.bin",
+      "md5": "1a1298b0508dab827dd46c02cc40fb6c"
     },
     {
       "name": "firmware_core-v3-0-0.bin",
-      "url": "https://github.com/MakeACS/HW-NFC-Core/releases/download/3.0.1/firmware_core-v3-0-0.bin",
-      "md5": "b9da0d7af254624d9c22d497852674da"
+      "url": "https://github.com/MakeACS/HW-NFC-Core/releases/download/3.0.2/firmware_core-v3-0-0.bin",
+      "md5": "254c4ce6996c1c2c00dfc08b11a09889"
     }
   ]
 }

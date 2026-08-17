@@ -299,6 +299,7 @@ void setup() {
   }
 
   //Load settings from memory
+  settings.begin("settings", false);
 
   //Get our serial number;
 
@@ -342,7 +343,6 @@ void setup() {
   Serial.println(getEthernetMacAddress());
 #endif
 
-  settings.begin("settings", false);
   migrateLegacySettings();
   xTaskCreate(runConfigurationController, "Configuration", 4096, NULL, 5, NULL);
 

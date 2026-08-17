@@ -1,3 +1,12 @@
+/*
+
+FrontendController
+
+Used to handle the secondary MCU that is present on 2.3.2 hardware, which handles the audio and visuals, as well as card detect.
+
+*/
+
+
 #include "Globals.h"
 #include "FrontendController.h"
 

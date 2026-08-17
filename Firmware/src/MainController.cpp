@@ -12,7 +12,7 @@ More info: https://github.com/MakeACS/HW-NFC-Core
 
 */
 
-#define FIRMWARE_VERSION "3.0.0"
+#define FIRMWARE_VERSION "3.0.1"
 
 #include <Arduino.h>
 #include "Globals.h"

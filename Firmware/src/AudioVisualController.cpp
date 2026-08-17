@@ -1,6 +1,6 @@
 /* 
 These tasks are responsible for communicating with the frontend, handling things like switch states, LED and buzzer control, etc.
-There are 3 tasks;
+There are 2 tasks;
   runAudioVisualController - Converts flags from other tasks into a series of LED lights and buzzer tones.
   watchRestartButton - Listens for the front button to be held for 5 seconds, restarts the device. All other reset source throughout the code are handled by this task as well.
 */
@@ -88,7 +88,8 @@ void runAudioVisualController(void *pvParameters){
       //Animation 2: Solid greenLed
       LEDAnimation = 2;
     }
-    if(LightState.equals("UNKNOWN") || networkState.unavailable){
+    if((LightState.equals("UNKNOWN") && !welcomeMode) || networkState.unavailable){
+      //If any channel is unknown (when not in welcome mode), or the network is unavailable.
       //Animation 7: Solid blueLed
       LEDAnimation = 7;
     }

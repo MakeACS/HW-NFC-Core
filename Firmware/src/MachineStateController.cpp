@@ -130,11 +130,24 @@ void runMachineStateLoop(void *pvParameters){
       inputMode = "TEMP_PRESENT";
       channels.count = 0;
     } else{
-      inputMode = defaultInputMode;
-      //Re-load the channel count we have stored in memory;
-      channels.count = settings.getString("channels.count").toInt();
-    }
+      //Run one-time cleanup to get out of welcomeMode:
+      if(inputMode != defaultInputMode){
+        inputMode = defaultInputMode;
+        //Re-load the channel count we have stored in memory;
+        channels.count = settings.getString("channels.count").toInt();
+        //Set all channels to UNKNONWN
+        for(int i = 0; i < channels.count; i++){
+          channels.states[i] = "UNKNOWN";
+          channels.lastStates[i] = "UNKNOWN";
+          channels.changeReasons[i] = "LOCAL";
+          channels.authorizationReasons[i] = "LOCAL";
+          channels.reportedStates[i] = "UNKNOWN";
+        }
+        //We should immediately request new information from the server, since we are no longer in welcome mode.
+        mqttState.requestInfo = true;
+      }
 
+    }
     //Some random cleanup, none of these should be set if there isn't a card present
     if(!cardPresent){
       mqttState.welcomingPending = false;
@@ -166,20 +179,11 @@ void runMachineStateLoop(void *pvParameters){
         //Accept the current card as the actual card.
         cardPresent = true;
         currentUserUid = detectedUid;
-        if(welcomeMode && !networkState.unavailable){
-          //Let's welcome the user to the makerspace
-          mqttState.sendWelcome = true;
-          mqttState.welcomingPending = true;
-        }
-        if((anyChannelMatcheschannelState("IDLE") || anyChannelMatcheschannelState("UNLOCKED")) && !networkState.unavailable){
-          //Let's check for auth with the server
-          pendingApproval = true;
-          mqttState.sendAuth = true;
-        } else if(!anyChannelMatcheschannelState("IDLE") && (!anyChannelMatcheschannelState("UNLOCKED") || anyChannelMatcheschannelState("ALWAYS_ON"))){
-          //Logic: If there are no channels in a state that the user could unlock, but something is already unlocked or always on, beep to confirm.
-          singleBeep = true;
-        } else if((anyChannelMatcheschannelState("IDLE") || anyChannelMatcheschannelState("UNLOCKED")) && networkState.unavailable){
-          //Fault beep and deny the user due to no network
+
+        //What do we do with the card? 
+
+        //If there is no network, we cannot do anything so we should just deny the user and beep.
+        if(networkState.unavailable){
           faultBeepRequested = true;
           accessDenied = true;
           for(int i = 0; i < channels.count; i++){
@@ -187,16 +191,29 @@ void runMachineStateLoop(void *pvParameters){
           }
           Serial.println(F("accessEnabled denied due to no network!"));
         } else{
-          //Auto-deny the user, likely all locked or in a fault state?
-          accessDenied = true;
-          for(int i = 0; i < channels.count; i++){
-            channels.authorizationReasons[i] = "Incorrect state, machine must be in \"IDLE\" mode to activate.";
+          //We have a network connection. Let's handle the user's card.
+          if(welcomeMode){
+            //Let's welcome the user to the makerspace
+            mqttState.sendWelcome = true;
+            mqttState.welcomingPending = true;
+          } else{
+            //We are not in welcome mode, so we should check if the user is authorized to use the machine.
+            if((anyChannelMatcheschannelState("IDLE") || anyChannelMatcheschannelState("UNLOCKED"))){
+              //There is a channel that is idle or unlocked, so we should ask the server if this user can auth them.
+              pendingApproval = true;
+              mqttState.sendAuth = true;
+            } else if(!anyChannelMatcheschannelState("IDLE") && (!anyChannelMatcheschannelState("UNLOCKED") || anyChannelMatcheschannelState("ALWAYS_ON"))){
+              //Logic: If there are no channels in a state that the user could unlock, but something is already unlocked or always on, beep to confirm.
+              singleBeep = true;
+            } else{
+              //Auto-deny the user, likely all locked or in a fault state?
+              accessDenied = true;
+              for(int i = 0; i < channels.count; i++){
+                channels.authorizationReasons[i] = "Incorrect state, machine must be in \"IDLE\" mode to activate.";
+              }
+              Serial.println(F("Auto-denied due to bad state."));
+            }
           }
-          Serial.println(F("Auto-denied due to bad state."));
-        }
-        if(networkState.unavailable){
-          //Give a fault beep, reject them immediately
-          faultBeepRequested = 1;
         }
       }
     } else{ //INSERT

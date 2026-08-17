@@ -349,10 +349,16 @@ void runMachineStateLoop(void *pvParameters){
     }
     //Set the GPIO of the bus based on channels.access
   #if CORE_HAS_LOCAL_CHANNEL_OUTPUTS
-    digitalWrite(PIN_GPIO_1, channels.access[0]);
-    digitalWrite(PIN_GPIO_2, channels.access[1]);
-    digitalWrite(PIN_GPIO_3, channels.access[2]);
-    digitalWrite(PIN_GPIO_4, channels.access[3]);
+  if(channels.count > 1){
+    //We only need to set the GPIOs if we have more than 1 channel, otherwise we just use PIN_ACCESS for all channels.
+    for(int i = 0; i < channels.count; i++){
+      if(channels.access[i]){
+        digitalWrite(PIN_GPIO_1 + i, HIGH);
+      } else{
+        digitalWrite(PIN_GPIO_1 + i, LOW);
+      }
+    }
+  }
   #endif
 
     //See if any of the channels changed state to report to the server;

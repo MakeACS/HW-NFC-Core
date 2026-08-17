@@ -574,7 +574,7 @@ void setup() {
     .name = "one_second_timer"     // Name for debugging
   };
   esp_timer_handle_t periodic_timer;
-  err = esp_timer_create(&timer_args, &periodic_timer);
+  esp_err_t err = esp_timer_create(&timer_args, &periodic_timer);
   if (err == ESP_OK) {
     //Start the timer to repeat every 1,000,000 microseconds (1 second)
     esp_timer_start_periodic(periodic_timer, 1000000);

@@ -31,6 +31,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install platformio
 
+      - name: Generate version.h
+        run: |
+          # Create version.h dynamically using the GitHub Release tag
+          echo "#define FIRMWARE_VERSION \"${{ github.ref_name }}\"" > src/version.h
+          echo "Created src/version.h with version ${{ github.ref_name }}"
+
       - name: Build All Environments
         run: pio run
 
@@ -71,7 +77,7 @@ jobs:
           
           cat release_assets/OTADirectory.json
 
-      - name: Commit and Push Manifest to Repository
+      - name: Commit and Push Manifest and Version to Repository
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -81,9 +87,9 @@ jobs:
           # Copy the newly named JSON out of the temporary folder
           cp release_assets/OTADirectory.json ./OTADirectory.json
           
-          # Add, commit, and push OTADirectory.json to the repo
-          git add OTADirectory.json
-          git commit -m "Update OTA manifest for release ${{ github.ref_name }} [skip ci]" || echo "No changes to commit"
+          # Add, commit, and push OTADirectory.json AND version.h to the repo
+          git add OTADirectory.json src/version.h
+          git commit -m "Update OTA directory and version.h for release ${{ github.ref_name }} [skip ci]" || echo "No changes to commit"
           git push origin main
 
       - name: Upload Binaries to Release

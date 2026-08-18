@@ -759,7 +759,9 @@ void loop() {
         infoFields.add("HOBBS_TIME");
       }
       infoFields.add("FLAGS"); //Check our flags, mostly for welcoming
+#ifdef CORE_HAS_SCREEN
       infoFields.add("HMI"); //Request human-readable info for any attached interface.
+#endif
       String InfoPayload;
       serializeJson(outgoing, InfoPayload);
       outgoing.clear();

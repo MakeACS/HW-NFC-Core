@@ -159,7 +159,7 @@ extern JsonDocument ConfigJson;
 extern ESP32OTAPull ota;
 extern ESP32Time rtc;
 extern WebSocketsClient socket;
-extern MQTTPubSub::PubSubClient<1024> mqtt;
+extern MQTTPubSub::PubSubClient<1536> mqtt;
 extern OneWire ds;
 #if CORE_NFC_READER_PN532
 extern Adafruit_PN532 nfc;

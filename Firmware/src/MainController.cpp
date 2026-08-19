@@ -113,7 +113,7 @@ void migrateLegacySettings();
   ESP32OTAPull ota;
   ESP32Time rtc;
   WebSocketsClient socket;
-  MQTTPubSub::PubSubClient<1024> mqtt;
+  MQTTPubSub::PubSubClient<1536> mqtt;
   OneWire ds(PIN_ONE_WIRE); 
 #if CORE_NFC_READER_PN532
   Adafruit_PN532 nfc(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_NFC_CS);
@@ -476,14 +476,14 @@ void setup() {
       sendStartupstatusMessage("WiFi Started.");
     }
 
+#if CORE_HAS_SCREEN
     // Also get rid of "No NET" on screen
     JsonDocument NoNetStart;
     NoNetStart["noNetwork"] = false;
     String NoNetToSend;
     serializeJson(NoNetStart, NoNetToSend);
-  #if CORE_HAS_SCREEN
     Serial0.println(NoNetToSend);
-  #endif
+#endif
 
     delay(500);
 
@@ -1352,9 +1352,39 @@ void connectNetwork(){
   mqttState.requestInfo = true;
   mqttState.sendPing = true;
   mqttState.nextPingTime = millis64() + 1000;
-  mqttState.logType = "Network Connected";
-  mqttState.logMessage = "Network Connected";
-  mqttState.logToSend = true;
+  JsonDocument NetConnect;
+  NetConnect["status"] = "connected";
+  //Check the interface in use
+  bool usingWifi = false;
+  #if CORE_HAS_ETHERNET
+  if(ETH.hasIP()){
+    NetConnect["interface"] = "ethernet";
+    //TODO add ethernet IP to payload
+  } else{
+    NetConnect["interface"] = "wifi";
+  }
+  #else
+    NetConnect["interface"] = "wifi";
+    usingWifi = true;
+  #endif
+  //If we are using wifi, add more info;
+  if(usingWifi){
+    NetConnect["ssid"] = networkConfiguration.wifiSsid;
+    NetConnect["bssid"] = WiFi.BSSIDstr();
+    NetConnect["rssi"] = WiFi.RSSI();
+    NetConnect["channel"] = WiFi.channel();
+    NetConnect["ip"] = WiFi.localIP();
+  }
+  NetConnect["uptime"] = millis64() / 1000;
+  String netPayload;
+  serializeJson(NetConnect, netPayload);
+  //If there is another log pending to send, do not overwrite it;
+  if(!mqttState.logToSend){
+    mqttState.logType = "network-info";
+    mqttState.logMessage = netPayload;
+    mqttState.logToSend = true;
+  }
+
 }
 
 #if CORE_HAS_ETHERNET

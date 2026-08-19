@@ -40,7 +40,7 @@ jobs:
       - name: Build All Environments
         run: pio run
 
-      - name: Prepare Binaries and JSON Manifest
+      - name: Prepare Binaries, ELFs, and JSON Manifest
         run: |
           mkdir -p release_assets
           
@@ -48,7 +48,7 @@ jobs:
           TAG="${{ github.ref_name }}"
           BASE_URL="https://github.com/$REPO/releases/download/$TAG"
           
-          # Initialize the base JSON structure under the new name
+          # Initialize the base JSON structure
           jq -n --arg version "$TAG" '{version: $version, firmwares: []}' > release_assets/OTADirectory.json
           
           for env_dir in .pio/build/*/; do
@@ -56,12 +56,21 @@ jobs:
               env_name=$(basename "$env_dir")
               
               if [ -f "$env_dir/firmware.bin" ]; then
+                # 1. Handle the .bin file
                 new_name="firmware_${env_name}.bin"
                 filepath="release_assets/${new_name}"
                 
                 cp "$env_dir/firmware.bin" "$filepath"
                 echo "Prepared ${new_name} for upload"
                 
+                # 2. Handle the .elf file for core dumps
+                if [ -f "$env_dir/firmware.elf" ]; then
+                  elf_name="firmware_${env_name}.elf"
+                  cp "$env_dir/firmware.elf" "release_assets/${elf_name}"
+                  echo "Prepared ${elf_name} for upload"
+                fi
+                
+                # 3. Calculate MD5 and update JSON (using the .bin file)
                 md5_hash=$(md5sum "$filepath" | awk '{print $1}')
                 file_url="${BASE_URL}/${new_name}"
                 
@@ -84,16 +93,16 @@ jobs:
           
           git checkout main
           
-          # Copy the newly named JSON out of the temporary folder
           cp release_assets/OTADirectory.json ./OTADirectory.json
           
-          # Add, commit, and push OTADirectory.json AND version.h to the repo
           git add OTADirectory.json src/version.h
           git commit -m "Update OTA directory and version.h for release ${{ github.ref_name }} [skip ci]" || echo "No changes to commit"
           git push origin main
 
-      - name: Upload Binaries to Release
+      - name: Upload Binaries and ELFs to Release
         uses: softprops/action-gh-release@v2
         with:
-          # ONLY upload the .bin files to the actual GitHub Release
-          files: Firmware/release_assets/*.bin
+          # Upload both .bin and .elf files to the GitHub Release
+          files: |
+            Firmware/release_assets/*.bin
+            Firmware/release_assets/*.elf

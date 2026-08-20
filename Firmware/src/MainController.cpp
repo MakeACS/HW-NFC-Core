@@ -72,6 +72,7 @@ TaggedSerial<decltype(::Serial)> mainSerial(::Serial, "[main] ");
   #include <mbedtls/md.h>          //Inherent to ESP32
   #include <stdio.h>
   #include <esp_crc.h>  // ESP32 built-in CRC header
+  #include "esp_core_dump.h"
 
   #include "Device.h" //Struct definition in a header so it can be used in multiple places and in function calls
 
@@ -465,6 +466,8 @@ void setup() {
     }
   }
 
+  bool otaVerified = false;
+
   if (ethernetReady || WiFi.status() == WL_CONNECTED) {
     if (ethernetReady) {
       networkState.transport = NetworkState::Transport::Ethernet;
@@ -504,14 +507,12 @@ void setup() {
 
     // 2. Verify the current firmware can reach the JSON (or rollback)
     const char* jsonUrl = "https://raw.githubusercontent.com/MakeACS/HW-NFC-Core/main/Firmware/OTADirectory.json";
-    bool isValid = ota.VerifyOrRevert(jsonUrl, FIRMWARE_VERSION);
+    otaVerified = ota.VerifyOrRevert(jsonUrl, FIRMWARE_VERSION);
 
-    // 3. If validation succeeded, check for a new update
-    if (isValid) {
+    // 3. Check for a new update before we continue;
       int otaresp = ota.CheckForOTAUpdate(jsonUrl, FIRMWARE_VERSION);
       Serial.print(F("OTA Response: "));
       Serial.println(getOtaErrorText(otaresp));
-    }
     // --- OTA LOGIC ENDS HERE ---
 
   } else {
@@ -522,6 +523,98 @@ void setup() {
 
   // If we made it past the OTA (or skipped it because offline),
   // then we are ready for normal operation.
+
+  //Before we continue, let's figure out why we restarted.
+  Serial.println(F("Checking reset reason..."));
+  if(otaVerified){
+    //We should report to the server that we updated.
+    mqttState.messageToSend = true;
+    mqttState.statusMessage = "OTA Update Successful: " + String(PIOENV_NAME) + " v" + FIRMWARE_VERSION;
+    Serial.println(F("Reset Reason: OTA Update Successful."));
+  } else{
+    //We restart for something other than an OTA
+    JsonDocument ResetDoc;
+    esp_reset_reason_t reason = esp_reset_reason();
+    if(reason == ESP_RST_INT_WDT || reason == ESP_RST_TASK_WDT || reason == ESP_RST_WDT){
+      //Watchdog reset
+      mqttState.logToSend = true;
+      mqttState.logType = "reset-log";
+      ResetDoc["reset-reason"] = reason;
+      ResetDoc["report"] = "Watchdog Reset. Source Unknown?";
+      Serial.println(F("Reset Reason: Watchdog Reset. Source Unknown?"));
+    }
+    else if(reason == ESP_RST_BROWNOUT || reason == ESP_RST_PWR_GLITCH){
+      //Power-related reset
+      mqttState.logToSend = true;
+      mqttState.logType = "reset-log";
+      ResetDoc["reset-reason"] = reason;
+      ResetDoc["report"] = "Power Issue Reset.";
+      mqttState.messageToSend = true;
+      mqttState.statusMessage = "Device restarted due to power anomaly. Check wiring and ensure properly-sized power supply is used.";
+      Serial.println(F("Reset Reason: Power Issue Reset."));
+    }
+    else if(reason == ESP_RST_CPU_LOCKUP || reason == ESP_RST_PANIC){
+      //CPU lockup or panic reset
+      mqttState.logToSend = true;
+      mqttState.logType = "reset-log";
+      ResetDoc["reset-reason"] = reason;
+      Serial.println(F("Reset Reason: CPU Lockup or Panic Reset. Attempting to get core dump summary..."));
+      // Get the core dump summary
+      esp_core_dump_summary_t summary;
+      esp_err_t crasherr = esp_core_dump_get_summary(&summary);
+      if (crasherr != ESP_OK) {
+        Serial.println(F("Failed to get core dump summary?"));
+        ResetDoc["report"] = "CPU Lockup or Panic Reset, with no core dump summary available.";
+        Serial.println(F("Failed to get core dump summary?"));
+      } else{
+        ResetDoc["report"] = "CPU Lockup or Panic Reset, core dump summary attached.";
+        Serial.println(F("Core dump summary retrieved successfully. Sending to server..."));
+        JsonObject dumpDoc = ResetDoc["core-dump-summary"].to<JsonObject>();
+        //Task ID
+        dumpDoc["task"] = summary.exc_task;
+        //Firmware SHA (Convert the 32-byte array to a 64-character hex string)
+        char sha_str[65] = {0};
+        for (int i = 0; i < 32; i++) {
+            sprintf(&sha_str[i * 2], "%02x", summary.app_elf_sha256[i]);
+        }
+        dumpDoc["firmware_sha"] = sha_str;
+
+        //Exception Registers (Formatted as Hex strings so they are easy to read)
+        char hex_buf[20];
+        sprintf(hex_buf, "0x%08lx", (unsigned long)summary.exc_pc);
+        dumpDoc["pc"] = hex_buf;
+        sprintf(hex_buf, "0x%04lx", (unsigned long)summary.ex_info.exc_cause);
+        dumpDoc["exc_cause"] = hex_buf;
+        sprintf(hex_buf, "0x%08lx", (unsigned long)summary.ex_info.exc_vaddr);
+        dumpDoc["exc_vaddr"] = hex_buf;
+
+        //backtrace info
+        JsonObject btDoc = dumpDoc["backtrace"].to<JsonObject>();
+        esp_core_dump_bt_info_t bt_info = summary.exc_bt_info;
+        btDoc["depth"] = bt_info.depth;
+        btDoc["corrupted"] = bt_info.corrupted;
+        JsonArray frames = btDoc["frames"].to<JsonArray>();
+        for (uint32_t i = 0; i < bt_info.depth; i++) {
+            char bt_hex[20];
+            sprintf(bt_hex, "0x%08lx", (unsigned long)bt_info.bt[i]);
+            frames.add(bt_hex);
+        }
+        //After reading the core dump summary, we should clear it so we don't keep sending it.
+        esp_core_dump_image_erase();
+      }
+    }
+    else{
+      //All other reset reasons are considered nominal.
+      Serial.println(F("Nominal reset reason, no need to send a report."));
+    }
+    if(mqttState.logToSend){
+      //We found a notable reset reason to send, let's package it to send out.
+      String resetPayload;
+      serializeJson(ResetDoc, resetPayload);
+      mqttState.logMessage = resetPayload;
+    }
+  }
+
   sendStartupstatusMessage("Connecting MQTT...");
 
   mqtt.begin(socket); //Enable MQTT on the websocket
@@ -547,24 +640,7 @@ void setup() {
 #endif
 
   //We should initialize the OneWire bus here, check for the right devices, etc.
-  //All onewire functionality disabled until further testing can be done.
-  /*
-  Serial.println(F("Starting OneWire..."));
-  sendStartupstatusMessage("Starting OneWire...");
-  discoverDevices();
-  loadInventoryFromFile();
-  if(deviceCount == 0){
-     Serial.println(F("Inventory empty! Scanning to initialize..."));
-     discoverDevices(); // This sets the initial baseline
-     saveInventoryToFile(); // Save it so it's not empty next time
-  }
-  //We should also immediately do a OneWire integrity check.
-  Serial.println(F("Checking Bus Integrity..."));
-  checkBusHealth();
-  updateBusTemperatures();
-  refreshLiveAddressBuffer();
-
-  */
+  //TODO will enable onewire in future version, needs more testing to be reliable. 
 
   //Initialize a precise timer for the Hobbs Timer
   Serial.println(F("Starting Critical Timer for Hobbs Time..."));
@@ -582,9 +658,6 @@ void setup() {
   } else {
     Serial.printf("Timer creation failed with error: %d\n", err);
   }
-
-  //Going forward, we will check the OneWire bus in a different task to make life easier.
-  //xTaskCreate(BusManager, "BusManager", 4096, NULL, 5, NULL);
 
   //Time to loop!
   xTaskCreate(runFrontendController, "Frontend", 2048, NULL, 5, NULL);
@@ -618,8 +691,6 @@ void loop() {
     JsonDocument outgoing; //Json to construct the outgoing message in
 
      //Step 4.1: See if we have any outgoing messages, and send them.
-
-     //temp disabled for testing
 
     if(mqttState.messageToSend){
       //Send a message to the history

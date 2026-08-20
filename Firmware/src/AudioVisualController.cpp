@@ -443,7 +443,6 @@ void watchRestartButton(void *pvParameters){
     }
     //Next, check if anything has asked for the device to be restarted.
     if(systemState.requestReset){
-      vTaskSuspendAll(); //Stop all other tasks
       Serial.print(F("Restarting. Source: "));
       Serial.println(systemState.resetReason);
       Serial.flush();

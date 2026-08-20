@@ -840,6 +840,14 @@ void loop() {
       flags["welcoming"] = welcomeMode;
       String FWVer = "CoreDuino " + String(FIRMWARE_VERSION);
       outgoing["firmware"] = FWVer;
+      //TODO verify this is the right key
+      /*
+      #ifdef NICE_HARDWARE_NAME
+      outgoing["hardware"] = NICE_HARDWARE_NAME;
+      #else
+      outgoing["hardware"] = HARDWARE_VERSION;
+      #endif
+      */
       String ConfigPayload;
       serializeJson(outgoing, ConfigPayload);
       outgoing.clear();

@@ -251,6 +251,25 @@ void setup() {
   pinMode(PIN_INTERRUPT, INPUT_PULLUP);
 
 #if USE_INTERNAL_USB_CDC
+  //Set all USB-related settings, including VID/PID, product name, etc.
+  USB.productName("Access Control Core");
+  USB.manufacturerName("MakeACS");
+  //Anything using internal CDC will use the proper internal serial number;
+
+  uint8_t unique_id[16]; 
+  
+  // ESP_EFUSE_OPTIONAL_UNIQUE_ID is the constant defined in the IDF table
+  esp_err_t usberr = esp_efuse_read_field_blob(ESP_EFUSE_OPTIONAL_UNIQUE_ID, unique_id, 128);
+
+  if (usberr == ESP_OK) {
+    for (int i = 0; i < 16; i++) {
+      if (unique_id[i] < 0x10) serialNumber += "0"; // Lead with zero if byte < 16
+      serialNumber += String(unique_id[i], HEX);
+    }
+    serialNumber.toUpperCase();
+  }
+  USB.serialNumber(serialNumber.c_str());
+  USB.PID(0x82D0); //PID for Access Control Core
   USB.begin();
 #endif
   Serial.begin(115200);

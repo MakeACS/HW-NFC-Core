@@ -23,7 +23,7 @@ public:
     enum ActionType { DONT_DO_UPDATE, UPDATE_BUT_NO_BOOT, UPDATE_AND_BOOT };
 
     // Return codes from CheckForOTAUpdate (Offset to -100 to avoid native HTTPClient collision)
-    enum ErrorCode { UPDATE_AVAILABLE = -103, NO_UPDATE_PROFILE_FOUND = -102, NO_UPDATE_AVAILABLE = -101, UPDATE_OK = 0, HTTP_FAILED = 1, WRITE_ERROR = 2, JSON_PROBLEM = 3, OTA_UPDATE_FAIL = 4 };
+    enum ErrorCode { SKIPPED_BAD_VERSION = -104,UPDATE_AVAILABLE = -103, NO_UPDATE_PROFILE_FOUND = -102, NO_UPDATE_AVAILABLE = -101, UPDATE_OK = 0, HTTP_FAILED = 1, WRITE_ERROR = 2, JSON_PROBLEM = 3, OTA_UPDATE_FAIL = 4 };
 
 private:
     void (*Callback)(int offset, int totallength) = NULL;
@@ -188,7 +188,7 @@ public:
     //Run this ASAP on boot to verify installed firmware works. 
     //Returns TRUE if verification was needed and succeeded, FALSE if verification was not needed.
     //If verification fails, the ESP32 will reboot and rollback to the previous firmware (i.e. no return). 
-bool VerifyOrRevert(const char* JSON_URL, const char* currentVersion)
+    bool VerifyOrRevert(const char* JSON_URL, const char* currentVersion)
     {
         // --- Hardware-level check to see if verification is actually needed ---
         esp_ota_img_states_t ota_state;
@@ -263,6 +263,7 @@ bool VerifyOrRevert(const char* JSON_URL, const char* currentVersion)
         String targetMD5 = "";
         bool foundProfile = false;
         bool shouldUpdate = false;
+        bool skippedBadVersion = false; // <-- NEW: Track if we skipped a bad version
 
         // SCOPE BLOCK: Fetch and Parse JSON, then destroy connection to free ~40KB of heap
         {
@@ -331,6 +332,7 @@ bool VerifyOrRevert(const char* JSON_URL, const char* currentVersion)
 
                     if (CVersion == badVer && !badVer.isEmpty()) {
                         if (SerialDebug) Serial.println("Skipping version: previously failed/reverted.");
+                        skippedBadVersion = true; // <-- NEW: Flag that we hit the bad version
                         continue; 
                     }
 
@@ -347,6 +349,10 @@ bool VerifyOrRevert(const char* JSON_URL, const char* currentVersion)
         } // End Scope Block
 
         if (!foundProfile) return NO_UPDATE_PROFILE_FOUND;
+        
+        // --- NEW: Return our specific code if we didn't update because of a bad version ---
+        if (skippedBadVersion && !shouldUpdate) return SKIPPED_BAD_VERSION; 
+        
         if (!shouldUpdate) return NO_UPDATE_AVAILABLE;
         if (Action == DONT_DO_UPDATE) return UPDATE_AVAILABLE;
         

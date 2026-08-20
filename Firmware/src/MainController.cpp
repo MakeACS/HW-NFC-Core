@@ -513,6 +513,26 @@ void setup() {
       int otaresp = ota.CheckForOTAUpdate(jsonUrl, FIRMWARE_VERSION);
       Serial.print(F("OTA Response: "));
       Serial.println(getOtaErrorText(otaresp));
+
+      if(otaresp == ESP32OTAPull::SKIPPED_BAD_VERSION){
+        //Important one; this is a failed OTA that was reverted. We should report it.
+        String revertMessage = "OTA Reverted! Version: ";
+        //Close the standard preferences.
+        settings.end();
+        delay(10);
+        settings.begin("ota_prefs", true);
+        String badVer = settings.getString("bad_ver", "");
+        settings.end();
+        //Re-open the main settings folder;
+        settings.begin("settings", false);
+        revertMessage += badVer;
+        revertMessage += " failed boot tests. Reverted to ";
+        revertMessage += FIRMWARE_VERSION;
+        mqttState.messageToSend = true;
+        mqttState.statusMessage = revertMessage;
+        Serial.println(revertMessage);
+      }
+
     // --- OTA LOGIC ENDS HERE ---
 
   } else {

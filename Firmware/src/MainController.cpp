@@ -558,6 +558,8 @@ void setup() {
       mqttState.logToSend = true;
       mqttState.logType = "reset-log";
       ResetDoc["reset-reason"] = reason;
+      ResetDoc["version"] = FIRMWARE_VERSION;
+      ResetDoc["hardware"] = PIOENV_NAME;
       Serial.println(F("Reset Reason: CPU Lockup or Panic Reset. Attempting to get core dump summary..."));
       // Get the core dump summary
       esp_core_dump_summary_t summary;

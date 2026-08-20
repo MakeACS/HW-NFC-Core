@@ -184,16 +184,21 @@ public:
     ESP32OTAPull &SetCACert(const char* cert) { RootCACert = cert; return *this; }
     ESP32OTAPull &SetInsecureHTTPS(bool insecure = true) { InsecureHTTPS = insecure; return *this; }
 
-    bool VerifyOrRevert(const char* JSON_URL, const char* currentVersion)
+
+    //Run this ASAP on boot to verify installed firmware works. 
+    //Returns TRUE if verification was needed and succeeded, FALSE if verification was not needed.
+    //If verification fails, the ESP32 will reboot and rollback to the previous firmware (i.e. no return). 
+bool VerifyOrRevert(const char* JSON_URL, const char* currentVersion)
     {
-        // --- NEW: Hardware-level check to see if verification is actually needed ---
+        // --- Hardware-level check to see if verification is actually needed ---
         esp_ota_img_states_t ota_state;
         const esp_partition_t *running_partition = esp_ota_get_running_partition();
         
         if (esp_ota_get_state_partition(running_partition, &ota_state) == ESP_OK) {
             if (ota_state != ESP_OTA_IMG_PENDING_VERIFY) {
                 if (SerialDebug) Serial.println("OTA Verification skipped: Firmware is not in a pending verification state (likely USB flash or already verified).");
-                return true; 
+                // Returning FALSE indicates that verification was NOT needed
+                return false; 
             }
         }
         // ---------------------------------------------------------------------------
@@ -231,6 +236,9 @@ public:
         if (success) {
             esp_ota_mark_app_valid_cancel_rollback();
             if (SerialDebug) Serial.println("App marked valid at hardware level. Rollback cancelled.");
+            
+            // Returning TRUE indicates verification WAS needed and succeeded
+            return true;
         } else {
             if (SerialDebug) Serial.println("Verification timed out. Triggering hardware rollback!");
             
@@ -239,10 +247,12 @@ public:
             prefs.putString("bad_ver", currentVersion);
             prefs.end();
 
+            // This function halts execution and restarts the ESP32.
             esp_ota_mark_app_invalid_rollback_and_reboot();
+            
+            // This return is unreachable due to the reboot, but is required by the compiler.
+            return false;
         }
-        
-        return success;
     }
 
     int CheckForOTAUpdate(const char* JSON_URL, const char *CurrentVersion, ActionType Action = UPDATE_AND_BOOT)

@@ -79,6 +79,7 @@ TaggedSerial<decltype(::Serial)> mainSerial(::Serial, "[main] ");
 //Function Prototypes:
 String readNfcCardId();
 bool anyChannelMatcheschannelState(String targetState);
+String disconnectReasonToString(uint8_t reason);
 
 void sendDisplaychannelState(bool sendRarely, bool sendFrequently);
 int readScreenRotation();
@@ -152,6 +153,10 @@ String detectedUid = ""; //Stores the last-found currentUserUid
 bool faultBeepRequested = 0; //We use the 3 beep normally for fault to indicate cannot welcome/auth due to no network, to differentiate from welcome/auth denied.
 
 int MakerspaceNumber = 36;  // number from the makerspace's URL. We need to hard-code this for now.
+
+//Network Disconnect Reason Tracking
+volatile uint8_t lastDisconnectReason = 0;
+String lastDisconnectReasonVerbose = "Initial Connection";
 
 //Variables - System channels.states
 bool identifyRequested = 0; //Set to 1 to play an identification alarm/buzzer.
@@ -470,6 +475,16 @@ void setup() {
   if (!ethernetReady) {
     sendStartupstatusMessage("Starting WiFi...");
     WiFi.mode(WIFI_STA);
+    WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+      if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+        lastDisconnectReason = info.wifi_sta_disconnected.reason;
+        lastDisconnectReasonVerbose = disconnectReasonToString(lastDisconnectReason);
+        Serial.print(F("WiFi disconnected. Reason: "));
+        Serial.print(lastDisconnectReasonVerbose);
+        Serial.print(F(" - "));
+        Serial.println(lastDisconnectReason);
+      }
+    });
     WiFi.begin(networkConfiguration.wifiSsid, networkConfiguration.wifiPassword);
     WiFi.setSleep(false);
     WiFi.setAutoReconnect(true);
@@ -1268,8 +1283,9 @@ void connectNetwork(){
 #endif
   {
     networkState.transport = NetworkState::Transport::WiFi;
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(networkConfiguration.wifiSsid, networkConfiguration.wifiPassword);
+    //Should not need to restart the WiFi.
+    //WiFi.mode(WIFI_STA);
+    //WiFi.begin(networkConfiguration.wifiSsid, networkConfiguration.wifiPassword);
   if(WiFi.status() != WL_CONNECTED){
     WiFi.reconnect(); //Force a manual connect attempt
     Serial.println(F("No WiFi? Waiting for reconnect"));
@@ -1494,6 +1510,12 @@ void connectNetwork(){
     NetConnect["rssi"] = WiFi.RSSI();
     NetConnect["channel"] = WiFi.channel();
     NetConnect["ip"] = WiFi.localIP();
+    //NEW: Add the disconnect reasons
+    if(lastDisconnectReason != 0){
+      //If 0, we just reconnected no need to send this.
+      NetConnect["disconnectReason"] = lastDisconnectReason;
+      NetConnect["disconnectReasonString"] = lastDisconnectReasonVerbose;
+    }
   }
   NetConnect["uptime"] = millis64() / 1000;
   String netPayload;
@@ -1932,3 +1954,72 @@ void IRAM_ATTR updateHobbsCounter(void* arg) {
   }
 }
 
+String disconnectReasonToString(uint8_t reason) {
+  switch (reason) {
+    case 0: return "STARTUP";
+    case 1: return "UNSPECIFIED";
+    case 2: return "AUTH_EXPIRE";
+    case 3: return "AUTH_LEAVE";
+    case 4: return "DISASSOC_DUE_TO_INACTIVITY";
+    case 5: return "ASSOC_TOOMANY";
+    case 6: return "CLASS2_FRAME_FROM_NONAUTH_STA";
+    case 7: return "CLASS3_FRAME_FROM_NONASSOC_STA";
+    case 8: return "ASSOC_LEAVE";
+    case 9: return "ASSOC_NOT_AUTHED";
+    case 10: return "DISASSOC_PWRCAP_BAD";
+    case 11: return "DISASSOC_SUPCHAN_BAD";
+    case 12: return "BSS_TRANSITION_DISASSOC";
+    case 13: return "IE_INVALID";
+    case 14: return "MIC_FAILURE";
+    case 15: return "4WAY_HANDSHAKE_TIMEOUT";
+    case 16: return "GROUP_KEY_UPDATE_TIMEOUT";
+    case 17: return "IE_IN_4WAY_DIFFERS";
+    case 18: return "GROUP_CIPHER_INVALID";
+    case 19: return "PAIRWISE_CIPHER_INVALID";
+    case 20: return "AKMP_INVALID";
+    case 21: return "UNSUPP_RSN_IE_VERSION";
+    case 22: return "INVALID_RSN_IE_CAP";
+    case 23: return "802_1X_AUTH_FAILED";
+    case 24: return "CIPHER_SUITE_REJECTED";
+    case 25: return "TDLS_PEER_UNREACHABLE";
+    case 26: return "TDLS_UNSPECIFIED";
+    case 27: return "SSP_REQUESTED_DISASSOC";
+    case 28: return "NO_SSP_ROAMING_AGREEMENT";
+    case 29: return "BAD_CIPHER_OR_AKM";
+    case 30: return "NOT_AUTHORIZED_THIS_LOCATION";
+    case 31: return "SERVICE_CHANGE_PRECLUDES_TS";
+    case 32: return "UNSPECIFIED_QOS_REASON";
+    case 33: return "NOT_ENOUGH_BANDWIDTH";
+    case 34: return "DISASSOC_LOW_ACK";
+    case 35: return "EXCEEDED_TXOP";
+    case 36: return "STA_LEAVING";
+    case 37: return "END_TS_BA_DLS";
+    case 38: return "UNKNOWN_TS_BA";
+    case 39: return "TIMEOUT";
+    case 46: return "PEERKEY_MISMATCH";
+    case 47: return "AUTHORIZED_ACCESS_LIMIT_REACHED";
+    case 48: return "UNKNOWN_BSS_TRANSITION_MANAGEMENT_PARAM";
+    case 49: return "INVALID_PMKID";
+    case 50: return "INVALID_MDE";
+    case 51: return "INVALID_FTE";
+    case 67: return "TRANSMISSION_LINK_ESTABLISH_FAILED";
+    case 68: return "ALTERATIVE_CHANNEL_OCCUPIED";
+    
+    // ESP32 Specific Error Codes
+    case 200: return "BEACON_TIMEOUT";
+    case 201: return "NO_AP_FOUND";
+    case 202: return "AUTH_FAIL";
+    case 203: return "ASSOC_FAIL";
+    case 204: return "HANDSHAKE_TIMEOUT";
+    case 205: return "CONNECTION_FAIL";
+    case 206: return "AP_TSF_RESET";
+    case 207: return "ROAMING";
+    case 208: return "ASSOC_COMEBACK_TIME_TOO_LONG";
+    case 209: return "SA_QUERY_TIMEOUT";
+    case 210: return "NO_AP_FOUND_W_COMPATIBLE_SECURITY";
+    case 211: return "NO_AP_FOUND_IN_AUTHMODE_THRESHOLD";
+    case 212: return "NO_AP_FOUND_IN_RSSI_THRESHOLD";
+    
+    default: return String("UNKNOWN_") + String(reason);
+  }
+}

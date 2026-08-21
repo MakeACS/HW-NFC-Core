@@ -345,6 +345,9 @@ void setup() {
 
     if (err == ESP_OK) {
       Serial.print("Serial Number: ");
+
+      serialNumber = ""; //Overwrite anything in the string.
+
       for (int i = 0; i < 16; i++) {
         if (unique_id[i] < 0x10) serialNumber += "0"; // Lead with zero if byte < 16
         serialNumber += String(unique_id[i], HEX);

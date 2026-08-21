@@ -750,7 +750,7 @@ void loop() {
       mqttState.logToSend = false;
       outgoing["auditLog"] = false; //Don't print in the history
       outgoing["message"] = mqttState.logMessage;
-      outgoing["type"] = mqttState.logType;
+      outgoing["category"] = mqttState.logType;
       String LogPayload;
       serializeJson(outgoing, LogPayload);
       outgoing.clear();

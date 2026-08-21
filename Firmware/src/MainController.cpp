@@ -498,6 +498,9 @@ void setup() {
         delay(500);
       }
     }
+    //Wifi connected.
+    lastDisconnectReason = 99;
+    //We store 99 here so that if we have a network disconnect, but do not register a wifi disconnect, we do not blame it on the wifi.
   }
 
   bool otaVerified = false;
@@ -2004,7 +2007,10 @@ String disconnectReasonToString(uint8_t reason) {
     case 51: return "INVALID_FTE";
     case 67: return "TRANSMISSION_LINK_ESTABLISH_FAILED";
     case 68: return "ALTERATIVE_CHANNEL_OCCUPIED";
-    
+
+    //Special case; reports when a disconnect was not Wifi based.
+    case 99: return "NOMINAL_WIFI";
+
     // ESP32 Specific Error Codes
     case 200: return "BEACON_TIMEOUT";
     case 201: return "NO_AP_FOUND";

@@ -1,5 +1,7 @@
 #pragma once
 
+#define NICE_HARDWARE_NAME "2.3.2-LE"
+
 #define HARDWARE_VERSION "2.3.2"
 #define USE_INTERNAL_USB_CDC 0
 

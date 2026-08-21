@@ -224,15 +224,29 @@ void runMachineStateLoop(void *pvParameters){
     #endif
         //New card inserted!
         cardPresent = true;
-        currentUserUid = detectedUid;
-        if(anyChannelMatcheschannelState("IDLE") && !networkState.unavailable){
+        bool cardRead = false;
+        if(detectedUid.length() > 2){
+          //Accept the current card as the actual card.
+          currentUserUid = detectedUid;
+          cardRead = true;
+        } else{
+          //We have a card present, but we cannot read it. This is likely a bad card or a bad read. 
+          //We should deny the user and beep.
+          accessDenied = true;
+          for(int i = 0; i < channels.count; i++){
+            channels.authorizationReasons[i] = "Card could not be read, try again or talk to staff.";
+          }
+          Serial.println(F("Access denied due to unreadable card!"));
+        }
+        //Only do the rest if a card was actually read
+        if(cardRead && anyChannelMatcheschannelState("IDLE") && !networkState.unavailable){
           //Let's check for auth with the server
           pendingApproval = true;
           mqttState.sendAuth = true;
-        } else if(!anyChannelMatcheschannelState("IDLE") && (anyChannelMatcheschannelState("UNLOCKED") || anyChannelMatcheschannelState("ALWAYS_ON"))){
+        } else if(cardRead && !anyChannelMatcheschannelState("IDLE") && (anyChannelMatcheschannelState("UNLOCKED") || anyChannelMatcheschannelState("ALWAYS_ON"))){
           //Logic: If there are no channels in IDLE that the user could unlock, but something is already unlocked or always on, beep to confirm.
           singleBeep = true;
-        } else if(anyChannelMatcheschannelState("IDLE") && networkState.unavailable){
+        } else if(cardRead && anyChannelMatcheschannelState("IDLE") && networkState.unavailable){
           //Fault beep and deny the user due to no network
           faultBeepRequested = true;
           accessDenied = true;
@@ -240,7 +254,7 @@ void runMachineStateLoop(void *pvParameters){
             channels.authorizationReasons[i] = "No network, try again soon or talk to staff.";
           }
           Serial.println(F("accessEnabled denied due to no network!"));
-        } else{
+        } else if(cardRead){
           //Auto-deny the user, likely all locked or in a fault state?
           accessDenied = true;
           for(int i = 0; i < channels.count; i++){
@@ -490,6 +504,30 @@ String readNfcCardId(){
     ReturnedID = "";
   }
 #elif CORE_NFC_READER_PN532
+  //1. Check the reader is working. If not, restart it.
+  byte NFCTryCount = 0;
+  uint32_t versionData = nfc.getFirmwareVersion();
+  while(!versionData && NFCTryCount < 3) {
+    //PN532 not responding, restart it.
+    digitalWrite(PIN_NFC_RST, LOW);
+    delay(10);
+    digitalWrite(PIN_NFC_RST, HIGH);
+    delay(10);
+    nfc.wakeup();
+    nfc.setPassiveActivationRetries(0xFF);
+    delay(10);
+    NFCTryCount++;
+    versionData = nfc.getFirmwareVersion();
+  }
+  if(NFCTryCount >= 3){
+    Serial.println(F("PN532 failed to respond after 3 restart attempts. Cannot read card."));
+    ReturnedID = "";
+    if(!mqttState.messageToSend){
+      //Send a message
+      mqttState.statusMessage = "Possible malfunction of NFC reader, please check the device.";
+      mqttState.messageToSend = true;
+    }
+  }
   uint8_t uid[10] = {0};
   uint8_t uidLength = 0;
   if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 100)) {
@@ -502,7 +540,13 @@ String readNfcCardId(){
     ReturnedID.toLowerCase();
   }
 #endif
-  return ReturnedID;
+  if(ReturnedID.length() > 0){
+    return ReturnedID;
+  } else{
+    //We did not find a card due to errors or no card present.
+    return "";
+  }
+
 }
 
 bool anyChannelMatcheschannelState(String targetState) {

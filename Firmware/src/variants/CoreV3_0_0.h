@@ -1,5 +1,7 @@
 #pragma once
 
+#define NICE_HARDWARE_NAME "3.0.0"
+
 #define HARDWARE_VERSION "3.0.0"
 #define USE_INTERNAL_USB_CDC 1
 

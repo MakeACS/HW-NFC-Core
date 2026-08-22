@@ -80,6 +80,7 @@ TaggedSerial<decltype(::Serial)> mainSerial(::Serial, "[main] ");
 String readNfcCardId();
 bool anyChannelMatcheschannelState(String targetState);
 String disconnectReasonToString(uint8_t reason);
+void resetKeepAliveTimer();
 
 void sendDisplaychannelState(bool sendRarely, bool sendFrequently);
 int readScreenRotation();
@@ -222,6 +223,16 @@ String hmiMakerspace;
 String hmiDeviceName;
 String hmiRole;
 String stationName;
+
+//Struct for keepalive/ping messages for MQTT.
+struct KeepAlivePing {
+  uint64_t gapTime = 2000; //The time between pings, in milliseconds.
+  uint64_t nextTime = 0; //The next time we should send a ping.
+  uint64_t lastPingTime = 0; //The last time we sent a ping.
+  bool missedPing = false; //Tracks if we missed a ping.
+  bool pingPending = false; //Tracks if we have a ping pending.
+};
+KeepAlivePing keepAlivePing;
 
 void setup() {
   // put your setup code here, to run once:
@@ -740,21 +751,42 @@ void loop() {
   //Step 0: Call the MQTT updater;
   mqtt.update();
 
+  delay(10);
+
+  //Ping-related checks;
+  if(keepAlivePing.nextTime <= millis64()){
+    //It is time to send a ping 
+    if(keepAlivePing.missedPing && keepAlivePing.pingPending){
+      //We missed 2 pings in a row, something may be wrong with the network?
+      networkState.unavailable = true;
+      connectNetwork(); //Try to re-connect to the network.
+    } else{
+      resetKeepAliveTimer();
+      String PingTopic = mqttState.baseTopic + "/ping";
+      publishMqttstatusMessage(PingTopic, "Ping!");
+      keepAlivePing.lastPingTime = millis64();
+      //Did we recently send a ping and not hear back yet?
+      if(keepAlivePing.pingPending){
+        //We didn't hear back from the last ping, so we missed it.
+        keepAlivePing.missedPing = true;
+      } else{
+        //We didn't send a ping previously, so we are now waiting for a ping response.
+        keepAlivePing.pingPending = true;
+      }
+    }
+  }
+
   //Step 4: Communicate with the server
 
   //Only do all this if we have a connection
-  if(mqtt.isConnected() && !networkState.unavailable){
-
-    if(networkState.unavailable){
-      networkState.unavailable = false;
-      updateScreen = true;
-    }
+  if(mqtt.isConnected()){
 
     JsonDocument outgoing; //Json to construct the outgoing message in
 
-     //Step 4.1: See if we have any outgoing messages, and send them.
+     //Send any outgoing messages
+     //But only we if have network
 
-    if(mqttState.messageToSend){
+    if(mqttState.messageToSend && !networkState.unavailable){
       //Send a message to the history
       mqttState.messageToSend = false;
       outgoing["auditLog"] = true; //Print in the history
@@ -766,7 +798,7 @@ void loop() {
       String MessageTopic = mqttState.baseTopic + "/log";
       publishMqttstatusMessage(MessageTopic, MessagePayload);
     }
-    if(mqttState.logToSend){
+    if(mqttState.logToSend && !networkState.unavailable){
       //Send a log to the audit logs (not the user-visible history)
       mqttState.logToSend = false;
       outgoing["auditLog"] = false; //Don't print in the history
@@ -779,7 +811,7 @@ void loop() {
       publishMqttstatusMessage(LogTopic, LogPayload);
       mqttState.logType = "message"; //Default value unless we say otherwise.
     }
-    if(mqttState.sendAuth){
+    if(mqttState.sendAuth && !networkState.unavailable){
       //Send an auth request to the server
       mqttState.sendAuth = false;
       outgoing["state"] = "UNLOCKED";
@@ -790,7 +822,7 @@ void loop() {
       String AuthTopic = mqttState.baseTopic + "/authTo/request";
       publishMqttstatusMessage(AuthTopic, AuthPayload);
     }
-    if(mqttState.stateChange){
+    if(mqttState.stateChange && !networkState.unavailable){
       //Send report of a changed state
       mqttState.stateChange = false;
       if(!welcomeMode){
@@ -822,7 +854,7 @@ void loop() {
         //At the end, set change reason to nothing:
       }
     }
-    if(mqttState.reportConfig){
+    if(mqttState.reportConfig && !networkState.unavailable){
       //Report the current configuration
       mqttState.reportConfig = false;
       JsonArray configChannels = outgoing["channels"].to<JsonArray>();
@@ -875,7 +907,7 @@ void loop() {
       String ConfigTopic = mqttState.baseTopic + "/config/report";
       publishMqttstatusMessage(ConfigTopic, ConfigPayload);
     }
-    if(mqttState.requestInfo){
+    if(mqttState.requestInfo && !networkState.unavailable){
       //Request information from the server
       mqttState.requestInfo = false;
       JsonArray infoFields = outgoing["fields"].to<JsonArray>();
@@ -909,7 +941,7 @@ void loop() {
       String InfoTopic = mqttState.baseTopic + "/info/request";
       publishMqttstatusMessage(InfoTopic, InfoPayload);
     }
-    if(mqttState.sendStatus && !anyChannelMatcheschannelState("UNKNOWN")){
+    if(mqttState.sendStatus && !anyChannelMatcheschannelState("UNKNOWN") && !networkState.unavailable){
       //Send our current status to the server, we do not send it if we do not know our state. 
       mqttState.sendStatus = false;
       JsonArray statusChannels = outgoing["channels"].to<JsonArray>();
@@ -929,7 +961,7 @@ void loop() {
       String StatusTopic = mqttState.baseTopic + "/status";
       publishMqttstatusMessage(StatusTopic, StatusPayload);
     }
-    if(mqttState.sendWelcome){
+    if(mqttState.sendWelcome && !networkState.unavailable){
       //Send a welcome message to the server
       mqttState.sendWelcome = false;
       outgoing["cardTagID"] = currentUserUid;
@@ -942,7 +974,7 @@ void loop() {
 
     JsonDocument incoming; //Json doucment to parse the incoming
     
-    //Step 4.3: Process any incoming messages
+    //Process any incoming messages:
 
     if(mqttState.newAuth){
       //Process a response to an auth request.
@@ -1208,22 +1240,7 @@ void loop() {
       updateScreen = true;
     }
     
-    //Step 4.4: Send a ping if requested
-    if(mqttState.sendPing){
-      String PingTopic = mqttState.baseTopic + "/ping";
-      publishMqttstatusMessage(PingTopic, "Ping!");
-      //Serial.println(F("Ping sent."));
-      mqttState.sendPing = false;
-      mqttState.nextPingTime = millis64() + 1000;
-    }
-    
-  } else{
-    Serial.println(F("No network?"));
-    networkState.unavailable = true;
-    updateScreen = true;
-    connectNetwork();
   }
-
 }
 
 void handleOtaProgress(int offset, int totallength) {
@@ -1281,174 +1298,222 @@ uint64_t millis64(){
 void connectNetwork(){
   byte TLSRetryCount = 0; //Tracks how many failed TLS attempts we had in a row.
   retryNetwork:
-#if CORE_HAS_ETHERNET
-  if (ETH.hasIP()) {
+
+  //First, figure out if we should be using ethernet or wifi
+
+  bool useEthernet = false;
+
+  #if CORE_HAS_ETHERNET
+  if(ETH.hasIP()){
     networkState.transport = NetworkState::Transport::Ethernet;
     Serial.println(F("Using Ethernet connection."));
-  } else
-#endif
-  {
+    useEthernet = true;
+    //TODO the rest of the ethernet connect code, if any?
+  }
+  #endif
+  
+  bool wifiIssue = false;
+  if(!useEthernet){
+    //Using WIFI:
     networkState.transport = NetworkState::Transport::WiFi;
     //Should not need to restart the WiFi.
     //WiFi.mode(WIFI_STA);
     //WiFi.begin(networkConfiguration.wifiSsid, networkConfiguration.wifiPassword);
-  if(WiFi.status() != WL_CONNECTED){
-    WiFi.reconnect(); //Force a manual connect attempt
-    Serial.println(F("No WiFi? Waiting for reconnect"));
-    unsigned long long WiFiTime = millis64() + 15000;
-    while(WiFi.status() != WL_CONNECTED){
-      Serial.print(".");
-      delay(500);
-      if(WiFiTime <= millis64()){
-        Serial.println(F("Failed to connect to WiFi! Retrying..."));
-        goto retryNetwork;
+    if(WiFi.status() != WL_CONNECTED){
+      wifiIssue = true;
+      WiFi.reconnect(); //Force a manual connect attempt
+      Serial.println(F("No WiFi? Waiting for reconnect"));
+      unsigned long long WiFiTime = millis64() + 15000;
+      while(WiFi.status() != WL_CONNECTED){
+        Serial.print(".");
+        delay(500);
+        if(WiFiTime <= millis64()){
+          Serial.println(F("Failed to connect to WiFi! Retrying..."));
+          goto retryNetwork;
+        }
       }
-    }
-    Serial.println(F(" Connected!"));
-  } else{
-    Serial.println(F("Already had WiFi connection, skipping to websocket connection."));
-  }
-  }
-  
-  //Start our websocket connection
-  socket.disconnect();
-  const char* global_ca_pointer = rootCertificate.c_str();
-  socket.beginSslWithCA(networkConfiguration.serverAddress.c_str(), 443, "/mqtt", global_ca_pointer, "mqtt");
-  //Give the socket some time to stabilize:
-  unsigned long long wsTimeout = millis64() + 5000;
-  while(!socket.isConnected() && millis64() <= wsTimeout){
-    socket.loop();
-    delay(2);
-  }
-  //Did the socket work?
-  if(!socket.isConnected()){
-    Serial.println(F("Websocket connection failed..."));
-    socket.disconnect();
-    //Is the server alive?
-    if(!Ping.ping(networkConfiguration.serverAddress.c_str())){
-      //serverAddress is not responding?
-      Serial.println(F("Cannot ping the server. No network?"));
-      networkState.unavailable = true;
-      return;
+      Serial.println(F(" WiFi Connected!"));
     } else{
-      Serial.println(F("serverAddress is online. Bad TLS cert?"));
-      Serial.println(F("Trying TLS certs again to make sure..."));
-      if(TLSRetryCount <=5){
-        Serial.print(F("That was attempt: "));
-        Serial.print(TLSRetryCount);
-        Serial.println(F("/5 attempts before we get new certs."));
-        delay(1000);
-        TLSRetryCount++;
+      Serial.println(F("Already had WiFi connection, skipping to websocket connection."));
+    }
+  }
+
+  //Next, check our websocket connection:
+  bool socketIssue = false;
+  bool certIssue = false;
+  if(!socket.isConnected()){
+    //No socket connection?
+    socketIssue = true;
+    socket.disconnect();
+    const char* global_ca_pointer = rootCertificate.c_str();
+    socket.beginSslWithCA(networkConfiguration.serverAddress.c_str(), 443, "/mqtt", global_ca_pointer, "mqtt");
+    //Give the socket some time to stabilize:
+    unsigned long long wsTimeout = millis64() + 5000;
+    while(!socket.isConnected() && millis64() <= wsTimeout){
+      socket.loop();
+      delay(2);
+    }
+    //Did the socket work? If not, it may be a TLS cert issue.
+    if(!socket.isConnected()){
+      Serial.println(F("Websocket connection failed..."));
+      socket.disconnect();
+      //Is the server alive?
+      if(!Ping.ping(networkConfiguration.serverAddress.c_str())){
+        //Server is not responding?
+        Serial.println(F("Cannot ping the server. No network or server unavailable?"));
+        Serial.println(F("Going to retry network altogether..."));
         goto retryNetwork;
-      }
-      Serial.println(F("Getting new TLS certs from server."));
-      networkclient.setInsecure();
-      networkclient.connect(networkConfiguration.serverAddress.c_str(), 443);
-      
-      networkclient.print("GET /api/rootCA HTTP/1.1\r\n");
-      networkclient.print("Host: ");
-      networkclient.print(networkConfiguration.serverAddress.c_str());
-      networkclient.print("\r\n");
-
-      networkclient.print("shlug-sn: ");
-      networkclient.print(serialNumber.c_str());
-      networkclient.print("\r\n");
-      
-      networkclient.print("Connection: close\r\n");
-      
-      // End of headers boundary
-      networkclient.print("\r\n");
-
-      while (networkclient.connected()) {
-        String line = networkclient.readStringUntil('\n');
-        if (line == "\r") {
-          Serial.println("Headers received, body:");
-          break;
-        }
-      }
-      unsigned long timeout = millis();
-      while (networkclient.available() == 0) {
-        if (millis() - timeout > 5000) { // 5 second timeout
-          Serial.println("!!! Client Timeout awaiting body! !!!");
-          networkclient.stop();
-          return;
-        }
-        delay(10); 
-        networkState.unavailable = true;
-        goto retryNetwork;
-      }
-
-      // The body is a JSON, let's capture it in a string.
-      String TLSPayload;
-      while(networkclient.available()){
-        char c = networkclient.read();
-        TLSPayload += c;
-      }
-      
-      Serial.println(TLSPayload);
-      networkclient.stop(); // Always close the socket when finished!
-
-      //Parse the JSON payload
-      JsonDocument TLSJson;
-      deserializeJson(TLSJson, TLSPayload);
-      //Before we accept the new cert, we should check the SHA-256
-      String SHATLS = TLSJson["sha"];
-      String NewCert = TLSJson["cert"];
-      //The SHA is the hash of "[serialNumber]:[wifiPassword]:[Cert]""
-      Serial.print(F("JSON Hash:       ")); Serial.println(SHATLS);
-      Serial.print(F("Calculated Hash: ")); Serial.println(calculateSha256(serialNumber + ":" + networkConfiguration.mqttKey + ":" + NewCert));
-      if(SHATLS.equalsIgnoreCase(calculateSha256(serialNumber + ":" + networkConfiguration.mqttKey + ":" + NewCert))){
-       //The hashes match!
-       Serial.println(F("TLS cert was verified. Saving to memory..."));
-       SPIFFS.remove("/cert.txt");
-       File file = SPIFFS.open("/cert.txt", FILE_WRITE);
-       //Need to change the written /n to an actual newline, clean up any other oddities in the file:
-       NewCert.replace("\\n","\n");
-       NewCert.replace("\r","");
-       NewCert.replace("\"","");
-       NewCert.trim();
-       NewCert += "\n";
-       if(file.print(NewCert)){
-        file.close();
-        rootCertificate = NewCert;
-        Serial.println(F("New cert has been saved. Regular operation can now resume."));
-        Serial.println(F("Our new cert is:"));
-        Serial.println(rootCertificate);
-        Serial.flush();
-        delay(10);
-        goto retryNetwork;
-       } else{
-        networkState.unavailable = true;
-        Serial.println(F("Unknown error, could not write new cert to file?"));
-        goto retryNetwork;
-       }
-
       } else{
-        //The hashes did not match, potental attack in progress!
-        networkState.unavailable = true;
-        faultReason = "TLS hash does not match!";
-        Serial.println(F("CRITICAL ERROR: ATTEMPT WAS MADE TO LOAD BAD TLS CERTS!"));
-        //statusMessage = "Attmpted to load cert with bad hash?";
-        //messageToSend = true;
-        delay(1000);
+        Serial.println(F("Server is online. Bad TLS cert?"));
+        Serial.println(F("Trying TLS certs again to make sure..."));
+        if(TLSRetryCount <=5){
+          Serial.print(F("That was attempt: "));
+          Serial.print(TLSRetryCount);
+          Serial.println(F("/5 attempts before we get new certs."));
+          delay(1000);
+          TLSRetryCount++;
+          goto retryNetwork;
+        }
+        //The issue is probably the certs?
+        socketIssue = false;
+        certIssue = true;
+        Serial.println(F("Getting new TLS certs from server."));
+        networkclient.setInsecure();
+        networkclient.connect(networkConfiguration.serverAddress.c_str(), 443);
+        
+        networkclient.print("GET /api/rootCA HTTP/1.1\r\n");
+        networkclient.print("Host: ");
+        networkclient.print(networkConfiguration.serverAddress.c_str());
+        networkclient.print("\r\n");
+
+        networkclient.print("shlug-sn: ");
+        networkclient.print(serialNumber.c_str());
+        networkclient.print("\r\n");
+        
+        networkclient.print("Connection: close\r\n");
+        
+        // End of headers boundary
+        networkclient.print("\r\n");
+
+        while (networkclient.connected()) {
+          String line = networkclient.readStringUntil('\n');
+          if (line == "\r") {
+            Serial.println("Headers received, body:");
+            break;
+          }
+        }
+        unsigned long timeout = millis();
+        while (networkclient.available() == 0) {
+          if (millis() - timeout > 5000) { // 5 second timeout
+            Serial.println("!!! Client Timeout awaiting body! !!!");
+            networkclient.stop();
+            return;
+          }
+          delay(10); 
+          networkState.unavailable = true;
+          goto retryNetwork;
+        }
+
+        // The body is a JSON, let's capture it in a string.
+        String TLSPayload;
+        while(networkclient.available()){
+          char c = networkclient.read();
+          TLSPayload += c;
+        }
+        
+        Serial.println(TLSPayload);
+        networkclient.stop(); // Always close the socket when finished!
+
+        //Parse the JSON payload
+        JsonDocument TLSJson;
+        deserializeJson(TLSJson, TLSPayload);
+        //Before we accept the new cert, we should check the SHA-256
+        String SHATLS = TLSJson["sha"];
+        String NewCert = TLSJson["cert"];
+        //The SHA is the hash of "[serialNumber]:[wifiPassword]:[Cert]""
+        Serial.print(F("JSON Hash:       ")); Serial.println(SHATLS);
+        Serial.print(F("Calculated Hash: ")); Serial.println(calculateSha256(serialNumber + ":" + networkConfiguration.mqttKey + ":" + NewCert));
+        if(SHATLS.equalsIgnoreCase(calculateSha256(serialNumber + ":" + networkConfiguration.mqttKey + ":" + NewCert))){
+        //The hashes match!
+        Serial.println(F("TLS cert was verified. Saving to memory..."));
+        SPIFFS.remove("/cert.txt");
+        File file = SPIFFS.open("/cert.txt", FILE_WRITE);
+        //Need to change the written /n to an actual newline, clean up any other oddities in the file:
+        NewCert.replace("\\n","\n");
+        NewCert.replace("\r","");
+        NewCert.replace("\"","");
+        NewCert.trim();
+        NewCert += "\n";
+        if(file.print(NewCert)){
+          file.close();
+          rootCertificate = NewCert;
+          Serial.println(F("New cert has been saved. Regular operation can now resume."));
+          Serial.println(F("Our new cert is:"));
+          Serial.println(rootCertificate);
+          Serial.flush();
+          delay(10);
+          goto retryNetwork;
+        } else{
+          networkState.unavailable = true;
+          Serial.println(F("Unknown error, could not write new cert to file?"));
+          goto retryNetwork;
+        }
+
+        } else{
+          //The hashes did not match, potental attack in progress!
+          networkState.unavailable = true;
+          faultReason = "TLS hash does not match!";
+          Serial.println(F("CRITICAL ERROR: ATTEMPT WAS MADE TO LOAD BAD TLS CERTS!"));
+          //statusMessage = "Attmpted to load cert with bad hash?";
+          //messageToSend = true;
+          delay(1000);
+          goto retryNetwork;
+        }
+      }
+    } //If not this, the connection worked and we can continue.
+    socket.setReconnectInterval(2000); //Attempt to reconnect every 2 seconds if we lose connection
+    Serial.println(F("Websocket Connected."));
+  } else{
+    Serial.println(F("Websocket OK."));
+  }
+
+  //Lastly, let's check out mqtt connection:
+  Serial.println(F("Connecting MQTT..."));
+  bool mqttIssue = false;
+  if(!mqtt.isConnected()){
+    //MQTT is not connected. Reconnect.
+    mqttIssue = true;
+    unsigned long long mqttTime = millis64() + 15000;
+    while(!mqtt.connect(serialNumber, serialNumber, networkConfiguration.mqttKey)){ //Use serial number as unique ID, username, and key as password.
+      Serial.print(".");
+      socket.loop();
+      delay(500);
+      if(mqttTime <= millis64()){
+        Serial.println(F("Failed to connect to mqtt broker! Retrying network altogether..."));
         goto retryNetwork;
       }
-    }
-  } //If not this, the connection worked and we can continue.
-  socket.setReconnectInterval(2000); //Attempt to reconnect every 2 seconds if we lose connection
-  Serial.println(F("Connecting to MQTT Broker"));
-  unsigned long long SocketTime = millis64() + 15000;
-  while(!mqtt.connect(serialNumber, serialNumber, networkConfiguration.mqttKey)){ //Use serial number as unique ID, username, and key as password.
-    Serial.print(".");
-    socket.loop();
-    delay(500);
-    if(SocketTime <= millis64()){
-      Serial.println(F("Failed to connect to websocket! Retrying network altogether..."));
-      goto retryNetwork;
-    }
-  } 
-  Serial.println(F(" MQTT Connected!"));
-  networkState.unavailable = false;
+    } 
+    Serial.println(F(" MQTT Connected!"));
+  } else{
+    Serial.println(F("MQTT was already connected."));
+  }
+
+  //Let's figure out why we had to do a reconnect.
+  //wifiIssue, socketIssue, certIssue, mqttIssue
+  String connectBlame;
+  if(wifiIssue){
+    //Issue was caused by wifi
+    connectBlame = "WiFi";
+  } else if(certIssue){
+    //Issue was caused by cert
+    connectBlame = "TLS Cert";
+  } else if(socketIssue){
+    //Issue was caused by socket
+    connectBlame = "Websocket";
+  } else if(mqttIssue){
+    //Issue was caused by mqtt
+    connectBlame = "MQTT";
+  }
 
   //Subscribe to all MQTT topics relevant to us;
   mqttState.baseTopic = "makerspace/device/" + serialNumber;
@@ -1458,6 +1523,7 @@ void connectNetwork(){
     Serial.println(payload);
     mqttState.authResponse = payload;
     mqttState.newAuth = true;
+      
   });
   String SubInfo = mqttState.baseTopic + "/info/response";
   mqtt.subscribe(SubInfo, 2, [](const String& payload, const size_t size) {
@@ -1465,6 +1531,7 @@ void connectNetwork(){
     Serial.println(payload);
     mqttState.infoResponse = payload;
     mqttState.newInfo = true;
+    resetKeepAliveTimer();
   });
   String SubCommand = mqttState.baseTopic + "/command";
   mqtt.subscribe(SubCommand, 2, [](const String& payload, const size_t size) {
@@ -1472,6 +1539,7 @@ void connectNetwork(){
     Serial.println(payload);
     mqttState.commandResponse = payload;
     mqttState.newCommand = true;
+    resetKeepAliveTimer();
   });
   String SubWelcome = mqttState.baseTopic + "/welcome/response";
   mqtt.subscribe(SubWelcome, 2, [](const String& payload, const size_t size) {
@@ -1479,21 +1547,17 @@ void connectNetwork(){
     Serial.println(payload);
     mqttState.welcomeResponse = payload;
     mqttState.newWelcome = true;
+    resetKeepAliveTimer();
   });
   String SubPing = mqttState.baseTopic + "/ping";
   mqtt.subscribe(SubPing, 2, [](const String& payload, const size_t size) {
     //Serial.println(F("Ping Loopback."));
-    mqttState.newPing = true;
+    resetKeepAliveTimer();
   });
-
-  networkState.unavailable = false;
-  updateScreen = true;
 
   //We should request and report things when we (re)connect
   mqttState.reportConfig = true;
   mqttState.requestInfo = true;
-  mqttState.sendPing = true;
-  mqttState.nextPingTime = millis64() + 1000;
   JsonDocument NetConnect;
   NetConnect["status"] = "connected";
   //Check the interface in use
@@ -1524,6 +1588,8 @@ void connectNetwork(){
     }
   }
   NetConnect["uptime"] = millis64() / 1000;
+  //What went wrong that resulted in using having to do a reconnect?
+  NetConnect["connectBlame"] = connectBlame;
   String netPayload;
   serializeJson(NetConnect, netPayload);
   //If there is another log pending to send, do not overwrite it;
@@ -1532,7 +1598,6 @@ void connectNetwork(){
     mqttState.logMessage = netPayload;
     mqttState.logToSend = true;
   }
-
 }
 
 #if CORE_HAS_ETHERNET
@@ -2031,4 +2096,12 @@ String disconnectReasonToString(uint8_t reason) {
     
     default: return String("UNKNOWN_") + String(reason);
   }
+}
+
+void resetKeepAliveTimer(){
+  //Simple function that defers the time to send a ping, called when we get an MQTT payload.
+  keepAlivePing.nextTime = millis64() + keepAlivePing.gapTime;
+  keepAlivePing.missedPing = false; //We got something, so clear the missed ping flag.
+  keepAlivePing.pingPending = false; //We got something, so clear the missed ping flag.
+  networkState.unavailable = false; //We got something, so we must have a network connection.
 }

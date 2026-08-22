@@ -8,6 +8,7 @@ There are 2 tasks;
 #include "Globals.h"
 #include "AudioVisualController.h"
 #include "TaggedSerial.h"
+#include "OfflineList.h"
 
 namespace {
 TaggedSerial<decltype(::Serial)> audioVisualSerial(::Serial, "[av] ");
@@ -458,6 +459,11 @@ void watchRestartButton(void *pvParameters){
       Serial0.println("{\"command\":\"restart\"}");
       Serial0.flush();
     #endif
+
+      settings.end();
+      //Before we restart, let's save our offline list to memory.
+      saveListToSPIFFS();
+
       delay(50);
       ESP.restart();
     }

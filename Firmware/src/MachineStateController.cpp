@@ -163,18 +163,16 @@ void runMachineStateLoop(void *pvParameters){
       systemState.nextStatusTime = millis64() + STATUS_INTERVAL;
     }
 
-    //Step 1.2: Check for a change to the card. New one? Removed? 
-    detectedUid = readNfcCardId();
-    if(detectedUid == ""){
-      //Double check there really isn't a card present
-      detectedUid = readNfcCardId();
-    }
-    
     //Then, what state are we in? Tap? Insert? 
       //If we are in INSERT mode, we look at the switches before determining if we are looking for a card.
       //If we are in TEMP_PRESENT mode, we look for a card no matter what.
 
     if(inputMode == "TEMP_PRESENT"){
+      detectedUid = readNfcCardId();
+      if(detectedUid == ""){
+        //Double check there really isn't a card present
+        detectedUid = readNfcCardId();
+      }
       if(!cardPresent && detectedUid.length() > 2){
         //Accept the current card as the actual card.
         cardPresent = true;
@@ -225,6 +223,12 @@ void runMachineStateLoop(void *pvParameters){
         //New card inserted!
         cardPresent = true;
         bool cardRead = false;
+        //Read the card:
+        detectedUid = readNfcCardId();
+        if(detectedUid == ""){
+          //Double check there really isn't a card present
+          detectedUid = readNfcCardId();
+        }
         if(detectedUid.length() > 2){
           //Accept the current card as the actual card.
           currentUserUid = detectedUid;
@@ -527,26 +531,28 @@ String readNfcCardId(){
       mqttState.statusMessage = "Possible malfunction of NFC reader, please check the device.";
       mqttState.messageToSend = true;
     }
-  }
-  uint8_t uid[10] = {0};
-  uint8_t uidLength = 0;
-  if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 100)) {
-    for (uint8_t index = 0; index < uidLength; index++) {
-      if (uid[index] < 16) {
-        ReturnedID += "0";
+  } else{
+    //Do a normal card read:
+    uint8_t uid[10] = {0};
+    uint8_t uidLength = 0;
+    if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 100)) {
+      for (uint8_t index = 0; index < uidLength; index++) {
+        if (uid[index] < 16) {
+          ReturnedID += "0";
+        }
+        ReturnedID += String(uid[index], HEX);
       }
-      ReturnedID += String(uid[index], HEX);
+      ReturnedID.toLowerCase();
     }
-    ReturnedID.toLowerCase();
   }
-#endif
+#endif //END PN532
+
   if(ReturnedID.length() > 0){
     return ReturnedID;
   } else{
     //We did not find a card due to errors or no card present.
     return "";
   }
-
 }
 
 bool anyChannelMatcheschannelState(String targetState) {

@@ -22,6 +22,7 @@ More info: https://github.com/MakeACS/HW-NFC-Core
 #include "FrontendController.h"
 #include "MachineStateController.h"
 #include "TaggedSerial.h"
+#include "OfflineList.h"
 
 namespace {
 TaggedSerial<decltype(::Serial)> mainSerial(::Serial, "[main] ");
@@ -179,6 +180,8 @@ NetworkConfiguration networkConfiguration;
 int makerspaceId;
 
 MqttState mqttState;
+
+UserInfo user;
 
 Device sensorList[10];
 
@@ -491,12 +494,15 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
       if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
-        lastDisconnectReason = info.wifi_sta_disconnected.reason;
-        lastDisconnectReasonVerbose = disconnectReasonToString(lastDisconnectReason);
-        Serial.print(F("WiFi disconnected. Reason: "));
-        Serial.print(lastDisconnectReasonVerbose);
-        Serial.print(F(" - "));
-        Serial.println(lastDisconnectReason);
+        if(lastDisconnectReason == 0){
+          //Only log the first disconnect reason, in case there are multiples.
+          lastDisconnectReason = info.wifi_sta_disconnected.reason;
+          lastDisconnectReasonVerbose = disconnectReasonToString(lastDisconnectReason);
+          Serial.print(F("WiFi disconnected. Reason: "));
+          Serial.print(lastDisconnectReasonVerbose);
+          Serial.print(F(" - "));
+          Serial.println(lastDisconnectReason);
+        }
       }
     });
     WiFi.begin(networkConfiguration.wifiSsid, networkConfiguration.wifiPassword);
@@ -715,6 +721,10 @@ void setup() {
   //We should initialize the OneWire bus here, check for the right devices, etc.
   //TODO will enable onewire in future version, needs more testing to be reliable. 
 
+  //Get the offline list from SPIFFS
+  loadListFromSPIFFS();
+  Serial.println(F("Loaded offline list from memory."));
+
   //Initialize a precise timer for the Hobbs Timer
   Serial.println(F("Starting Critical Timer for Hobbs Time..."));
   const esp_timer_create_args_t timer_args = {
@@ -758,10 +768,12 @@ void loop() {
     //It is time to send a ping 
     if(keepAlivePing.missedPing && keepAlivePing.pingPending){
       //We missed 2 pings in a row, something may be wrong with the network?
-      networkState.unavailable = true;
-      connectNetwork(); //Try to re-connect to the network.
+      if(!networkState.unavailable){
+        networkState.unavailable = true;
+        connectNetwork(); //Try to re-connect to the network.
+      }
     } else{
-      resetKeepAliveTimer();
+       keepAlivePing.nextTime = millis64() + keepAlivePing.gapTime;
       String PingTopic = mqttState.baseTopic + "/ping";
       publishMqttstatusMessage(PingTopic, "Ping!");
       keepAlivePing.lastPingTime = millis64();
@@ -778,15 +790,15 @@ void loop() {
 
   //Step 4: Communicate with the server
 
-  //Only do all this if we have a connection
-  if(mqtt.isConnected()){
+  //Only send messages if we have a connection:
+  if(mqtt.isConnected() && !networkState.unavailable){
 
     JsonDocument outgoing; //Json to construct the outgoing message in
 
      //Send any outgoing messages
      //But only we if have network
 
-    if(mqttState.messageToSend && !networkState.unavailable){
+    if(mqttState.messageToSend){
       //Send a message to the history
       mqttState.messageToSend = false;
       outgoing["auditLog"] = true; //Print in the history
@@ -798,7 +810,7 @@ void loop() {
       String MessageTopic = mqttState.baseTopic + "/log";
       publishMqttstatusMessage(MessageTopic, MessagePayload);
     }
-    if(mqttState.logToSend && !networkState.unavailable){
+    if(mqttState.logToSend){
       //Send a log to the audit logs (not the user-visible history)
       mqttState.logToSend = false;
       outgoing["auditLog"] = false; //Don't print in the history
@@ -811,7 +823,7 @@ void loop() {
       publishMqttstatusMessage(LogTopic, LogPayload);
       mqttState.logType = "message"; //Default value unless we say otherwise.
     }
-    if(mqttState.sendAuth && !networkState.unavailable){
+    if(mqttState.sendAuth){
       //Send an auth request to the server
       mqttState.sendAuth = false;
       outgoing["state"] = "UNLOCKED";
@@ -821,8 +833,9 @@ void loop() {
       outgoing.clear();
       String AuthTopic = mqttState.baseTopic + "/authTo/request";
       publishMqttstatusMessage(AuthTopic, AuthPayload);
+
     }
-    if(mqttState.stateChange && !networkState.unavailable){
+    if(mqttState.stateChange){
       //Send report of a changed state
       mqttState.stateChange = false;
       if(!welcomeMode){
@@ -854,7 +867,7 @@ void loop() {
         //At the end, set change reason to nothing:
       }
     }
-    if(mqttState.reportConfig && !networkState.unavailable){
+    if(mqttState.reportConfig){
       //Report the current configuration
       mqttState.reportConfig = false;
       JsonArray configChannels = outgoing["channels"].to<JsonArray>();
@@ -907,11 +920,14 @@ void loop() {
       String ConfigTopic = mqttState.baseTopic + "/config/report";
       publishMqttstatusMessage(ConfigTopic, ConfigPayload);
     }
-    if(mqttState.requestInfo && !networkState.unavailable){
+    if(mqttState.requestInfo){
       //Request information from the server
       mqttState.requestInfo = false;
       JsonArray infoFields = outgoing["fields"].to<JsonArray>();
-      infoFields.add("TIME");
+      if(rtc.getYear() <= 2024){
+        //The RTC is not set, let's request the time.
+        infoFields.add("TIME");
+      }
       //Check if any of the states or HobbsTimers are unknown;
       bool AskForStates = false;
       bool AskForHobbs = false;
@@ -941,7 +957,7 @@ void loop() {
       String InfoTopic = mqttState.baseTopic + "/info/request";
       publishMqttstatusMessage(InfoTopic, InfoPayload);
     }
-    if(mqttState.sendStatus && !anyChannelMatcheschannelState("UNKNOWN") && !networkState.unavailable){
+    if(mqttState.sendStatus && !anyChannelMatcheschannelState("UNKNOWN")){
       //Send our current status to the server, we do not send it if we do not know our state. 
       mqttState.sendStatus = false;
       JsonArray statusChannels = outgoing["channels"].to<JsonArray>();
@@ -961,7 +977,7 @@ void loop() {
       String StatusTopic = mqttState.baseTopic + "/status";
       publishMqttstatusMessage(StatusTopic, StatusPayload);
     }
-    if(mqttState.sendWelcome && !networkState.unavailable){
+    if(mqttState.sendWelcome){
       //Send a welcome message to the server
       mqttState.sendWelcome = false;
       outgoing["cardTagID"] = currentUserUid;
@@ -972,9 +988,9 @@ void loop() {
       publishMqttstatusMessage(WelcomeTopic, WelcomePayload);
     }
 
+  }
+
     JsonDocument incoming; //Json doucment to parse the incoming
-    
-    //Process any incoming messages:
 
     if(mqttState.newAuth){
       //Process a response to an auth request.
@@ -989,12 +1005,16 @@ void loop() {
         if(ch >= 0 && ch < channels.count){
           bool IsAuthed = v["approved"].as<bool>();
           channels.authorizationReasons[ch] = v["reason"].as<String>();
-          
           if(channels.states[ch] == "IDLE" || (channels.states[ch] == "UNLOCKED" && inputMode == "TEMP_PRESENT")){ //Unlock only if idle, or re-up unlocked channels if in tap-present mode.
             if(IsAuthed){
-              Serial.println(F("accessEnabled Granted!"));
+              Serial.println(F("Access Granted!"));
               if(AuthID == currentUserUid){
                 Serial.println(F("UIDs match. Unlocking."));
+                if(!user.inOfflineList){
+                  //Add the user to the offline list:
+                  updateOfflineList(currentUserUid, rtc.getEpoch());
+                  Serial.println(F("User added to offline list."));
+                }
                 channels.states[ch] = "UNLOCKED";
                 channels.changeReasons[ch] = "AUTHED"; 
                 SendUnlockedBeep = true;
@@ -1077,6 +1097,8 @@ void loop() {
         rtc.setTime(millisecondTime/1000);
         Serial.print(F("Time set to: "));
         Serial.println(rtc.getDateTime(true));
+        //Once we know the time, we should clean up our offline user list;
+        cleanupOfflineList(rtc.getEpoch());
       }
       //Set flags:
       if(incoming.containsKey("flags")){
@@ -1240,7 +1262,6 @@ void loop() {
       updateScreen = true;
     }
     
-  }
 }
 
 void handleOtaProgress(int offset, int totallength) {
@@ -1523,6 +1544,7 @@ void connectNetwork(){
     Serial.println(payload);
     mqttState.authResponse = payload;
     mqttState.newAuth = true;
+    resetKeepAliveTimer();
       
   });
   String SubInfo = mqttState.baseTopic + "/info/response";
@@ -1581,12 +1603,14 @@ void connectNetwork(){
     NetConnect["channel"] = WiFi.channel();
     NetConnect["ip"] = WiFi.localIP();
     //NEW: Add the disconnect reasons
-    if(lastDisconnectReason != 0){
+    if(lastDisconnectReason != 0 && connectBlame == "WiFi"){
       //If 0, we just reconnected no need to send this.
+      //We also do not need to send unless the disconnect reason was the Wifi.
       NetConnect["disconnectReason"] = lastDisconnectReason;
       NetConnect["disconnectReasonString"] = lastDisconnectReasonVerbose;
     }
   }
+  lastDisconnectReason = 0; //Reset the reason
   NetConnect["uptime"] = millis64() / 1000;
   //What went wrong that resulted in using having to do a reconnect?
   NetConnect["connectBlame"] = connectBlame;
@@ -1598,6 +1622,11 @@ void connectNetwork(){
     mqttState.logMessage = netPayload;
     mqttState.logToSend = true;
   }
+  //Send a ping on connect:
+  String PingTopic = mqttState.baseTopic + "/ping";
+  publishMqttstatusMessage(PingTopic, "Ping!");
+  resetKeepAliveTimer();
+  Serial.println(F("Network connected."));
 }
 
 #if CORE_HAS_ETHERNET
@@ -1835,7 +1864,7 @@ void applyConfigurationJson(const String& json) {
 }
 
 void printConfigurationHelp() {
-  Serial.println(F("Configuration commands: h, help, ?, restart, or a JSON object."));
+  Serial.println(F("Configuration commands: h, help, ?, restart, wipeOffline, or a JSON object."));
   Serial.print(F("Device serial number: "));
   Serial.println(serialNumber);
   Serial.print(F("Device WiFi MAC address: "));
@@ -1855,6 +1884,10 @@ void processConfigurationCommand(String command) {
   if (normalizedCommand == "h" || normalizedCommand == "help" || normalizedCommand == "?") {
     printConfigurationHelp();
     return;
+  }
+  if (normalizedCommand == "wipeoffline"){
+    //Wipe the offline lists
+    deleteListFromSPIFFS();
   }
 
   if (normalizedCommand == "restart") {

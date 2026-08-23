@@ -158,6 +158,7 @@ int MakerspaceNumber = 36;  // number from the makerspace's URL. We need to hard
 //Network Disconnect Reason Tracking
 volatile uint8_t lastDisconnectReason = 0;
 String lastDisconnectReasonVerbose = "Initial Connection";
+unsigned long long lastReconnectTime = 0;
 
 //Variables - System channels.states
 bool identifyRequested = 0; //Set to 1 to play an identification alarm/buzzer.
@@ -1513,6 +1514,9 @@ void connectNetwork(){
   } else if(mqttIssue){
     //Issue was caused by mqtt
     connectBlame = "MQTT";
+  } else{
+    //Unknown issue?
+    connectBlame = "Unknown";
   }
 
   //Subscribe to all MQTT topics relevant to us;
@@ -1587,7 +1591,9 @@ void connectNetwork(){
       NetConnect["disconnectReasonString"] = lastDisconnectReasonVerbose;
     }
   }
-  NetConnect["uptime"] = millis64() / 1000;
+  NetConnect["sys_uptime"] = millis64() / 1000;
+  NetConnect["net_uptime"] = (millis64() - lastReconnectTime) / 1000;
+  lastReconnectTime = millis64();
   //What went wrong that resulted in using having to do a reconnect?
   NetConnect["connectBlame"] = connectBlame;
   String netPayload;

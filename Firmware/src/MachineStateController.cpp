@@ -1,12 +1,15 @@
 #include "Globals.h"
 #include "MachineStateController.h"
 #include "TaggedSerial.h"
+#include "OfflineList.h"
 
 namespace {
 TaggedSerial<decltype(::Serial)> machineStateSerial(::Serial, "[state] ");
 }
 
 #define Serial machineStateSerial
+
+void handleOfflineAuth();
 
 void runMachineStateLoop(void *pvParameters){
   Serial.println(F("runMachineStateLoop Started."));
@@ -153,6 +156,7 @@ void runMachineStateLoop(void *pvParameters){
       accessDenied = false;
       pendingApproval = false;
       pendingApproval = false;
+      user.inOfflineList = false;
     }
 
     //See if we have a regular status update to send
@@ -167,6 +171,7 @@ void runMachineStateLoop(void *pvParameters){
       //If we are in TEMP_PRESENT mode, we look for a card no matter what.
 
     if(inputMode == "TEMP_PRESENT"){
+      //We always scan for a card in TEMP_PRESENT mode
       detectedUid = readNfcCardId();
       if(detectedUid == ""){
         //Double check there really isn't a card present
@@ -176,29 +181,42 @@ void runMachineStateLoop(void *pvParameters){
         //Accept the current card as the actual card.
         cardPresent = true;
         currentUserUid = detectedUid;
+        //Does the user exist in offline lists?
+        user.inOfflineList = checkOfflineList(currentUserUid);
 
-        //What do we do with the card? 
+        //What do we do with the card?
 
         //If there is no network, we cannot do anything so we should just deny the user and beep.
-        if(networkState.unavailable){
+        if(networkState.unavailable && !user.inOfflineList){
           faultBeepRequested = true;
           accessDenied = true;
           for(int i = 0; i < channels.count; i++){
             channels.authorizationReasons[i] = "No network, try again soon or talk to staff.";
           }
-          Serial.println(F("accessEnabled denied due to no network!"));
+          Serial.println(F("Access denied due to no network!"));
         } else{
           //We have a network connection. Let's handle the user's card.
           if(welcomeMode){
             //Let's welcome the user to the makerspace
-            mqttState.sendWelcome = true;
-            mqttState.welcomingPending = true;
+            if(networkState.unavailable){
+              //We cannot welcome the user if there is no network.
+              accessDenied = true;
+              Serial.println(F("Unable to welcome user, no network."));
+            } else{
+              mqttState.sendWelcome = true;
+              mqttState.welcomingPending = true;
+            }
+
           } else{
             //We are not in welcome mode, so we should check if the user is authorized to use the machine.
             if((anyChannelMatcheschannelState("IDLE") || anyChannelMatcheschannelState("UNLOCKED"))){
               //There is a channel that is idle or unlocked, so we should ask the server if this user can auth them.
               pendingApproval = true;
               mqttState.sendAuth = true;
+              if(networkState.unavailable && user.inOfflineList){
+                //Auth the user offline:
+                handleOfflineAuth();
+              }
             } else if(!anyChannelMatcheschannelState("IDLE") && (!anyChannelMatcheschannelState("UNLOCKED") || anyChannelMatcheschannelState("ALWAYS_ON"))){
               //Logic: If there are no channels in a state that the user could unlock, but something is already unlocked or always on, beep to confirm.
               singleBeep = true;
@@ -232,6 +250,7 @@ void runMachineStateLoop(void *pvParameters){
           //Accept the current card as the actual card.
           currentUserUid = detectedUid;
           cardRead = true;
+          user.inOfflineList = checkOfflineList(currentUserUid);
         } else{
           //We have a card present, but we cannot read it. This is likely a bad card or a bad read. 
           //We should deny the user and beep.
@@ -242,21 +261,25 @@ void runMachineStateLoop(void *pvParameters){
           Serial.println(F("Access denied due to unreadable card!"));
         }
         //Only do the rest if a card was actually read
-        if(cardRead && anyChannelMatcheschannelState("IDLE") && !networkState.unavailable){
+        if(cardRead && anyChannelMatcheschannelState("IDLE")){
           //Let's check for auth with the server
           pendingApproval = true;
           mqttState.sendAuth = true;
+          if(networkState.unavailable && user.inOfflineList){
+            //Auth the user offline:
+            handleOfflineAuth();
+          }
         } else if(cardRead && !anyChannelMatcheschannelState("IDLE") && (anyChannelMatcheschannelState("UNLOCKED") || anyChannelMatcheschannelState("ALWAYS_ON"))){
           //Logic: If there are no channels in IDLE that the user could unlock, but something is already unlocked or always on, beep to confirm.
           singleBeep = true;
-        } else if(cardRead && anyChannelMatcheschannelState("IDLE") && networkState.unavailable){
-          //Fault beep and deny the user due to no network
+        } else if(cardRead && anyChannelMatcheschannelState("IDLE") && !user.inOfflineList && networkState.unavailable){
+          //Fault beep and deny the user due to no network, since we cannot auth them in our current state
           faultBeepRequested = true;
           accessDenied = true;
           for(int i = 0; i < channels.count; i++){
             channels.authorizationReasons[i] = "No network, try again soon or talk to staff.";
           }
-          Serial.println(F("accessEnabled denied due to no network!"));
+          Serial.println(F("Access denied due to no network!"));
         } else if(cardRead){
           //Auto-deny the user, likely all locked or in a fault state?
           accessDenied = true;
@@ -279,6 +302,7 @@ void runMachineStateLoop(void *pvParameters){
         Serial.print(F(" replaced with "));
         Serial.println(detectedUid);
         cardPresent = false;
+        user.inOfflineList = false;
         currentUserUid = "";
         mqttState.sendWelcome = false;
         mqttState.welcomingPending = false;
@@ -297,6 +321,7 @@ void runMachineStateLoop(void *pvParameters){
         currentUserUid = "";
         pendingApproval = false;
         accessDenied = false;
+        user.inOfflineList = false;
         for(int i = 0; i < channels.count; i++){
           if(channels.states[i] == "UNLOCKED"){
             channels.states[i] = "IDLE";
@@ -536,4 +561,28 @@ bool anyChannelMatcheschannelState(String targetState) {
     }
   }
   return false; // No matches found
+}
+
+void handleOfflineAuth(){
+  if(mqttState.sendAuth && user.inOfflineList && channels.count == 1 && networkState.unavailable){
+    //If we do not have a network connection, we can auth the user
+    //for single-channel devices only, using the offline list
+    //if the user is present on that list.
+    mqttState.sendAuth = false;
+    if(channels.states[0] == "IDLE"){
+      channels.states[0] = "UNLOCKED";
+      channels.changeReasons[0] = "LOCAL";
+    } else{
+      Serial.println(F("Offline unlocked failed due to bad state"));
+    }
+    if(channels.states[0] == "UNLOCKED"){
+      pendingApproval = false;
+      unlockedBeep = true;
+    }
+    if(channels.states[0] == "UNLOCKED" && inputMode == "TEMP_PRESENT"){
+      //Update the time
+      channels.tapExpirationTimes[0] = channels.tapDurations[0] * 1000 + millis64();
+    }
+    Serial.println(F("User authed based on offline list."));
+  }
 }

@@ -64,6 +64,7 @@
 struct NetworkState {
 	bool unavailable = true;
 	enum class Transport { None, WiFi, Ethernet } transport = Transport::None;
+	bool tryReconnect = false;
 };
 
 struct NetworkConfiguration {
@@ -122,6 +123,13 @@ struct ChannelState {
 	unsigned long tapDurations[kMaximumChannels] = {0, 0, 0, 0};
 	unsigned long long tapExpirationTimes[kMaximumChannels] = {0, 0, 0, 0};
 	volatile unsigned long hobbsSeconds[kMaximumChannels] = {0, 0, 0, 0};
+};
+
+//Struct for storing information related to the current user('s card)
+struct UserInfo {
+	//TODO eventually will use this as part of the re-organization of the global variables
+	//Currently only used for offline list stuff
+	bool inOfflineList = false;
 };
 
 // Forward declarations shared across translation units.
@@ -229,4 +237,4 @@ extern String hmiMakerspace;
 extern String hmiDeviceName;
 extern String hmiRole;
 extern String stationName;
-
+extern UserInfo user;

@@ -1,3 +1,3 @@
-# NFC Core Documentation
+# Documentation
 
-This is the documentation for the NFC Core. This cocumentation is meant to be used for technical development and construction of the device, and may not be pertinent to end-users.
+This folder contains documentation source for the project. Documentation is built on Zensical, and is meant to be viewed on Github Pages.

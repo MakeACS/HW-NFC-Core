@@ -13,6 +13,8 @@
 #define CORE_NFC_READER_PN532 1
 #define CORE_MAX_CHANNELS 1
 
+#define REDUCED_CONFIG 1 //Needed to keep enough memory clear for TLS
+
 #define PIN_NFC_POWER 8
 #define PIN_NFC_CS 6
 #define PIN_NFC_RST 4

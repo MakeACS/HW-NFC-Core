@@ -17,12 +17,13 @@ More info: https://github.com/MakeACS/HW-NFC-Core
 #include <Arduino.h>
 #include "Globals.h"
 #include "AudioVisualController.h"
-#include "ConfigurationController.h"
 #include "DisplayController.h"
 #include "FrontendController.h"
 #include "MachineStateController.h"
 #include "TaggedSerial.h"
 #include "OfflineList.h"
+#include "config.h"
+#include "helperFunctions.h"
 
 namespace {
 TaggedSerial<decltype(::Serial)> mainSerial(::Serial, "[main] ");
@@ -75,43 +76,11 @@ TaggedSerial<decltype(::Serial)> mainSerial(::Serial, "[main] ");
   #include <esp_crc.h>  // ESP32 built-in CRC header
   #include "esp_core_dump.h"
 
+
   #include "Device.h" //Struct definition in a header so it can be used in multiple places and in function calls
 
-//Function Prototypes:
-String readNfcCardId();
-bool anyChannelMatcheschannelState(String targetState);
-String disconnectReasonToString(uint8_t reason);
-void resetKeepAliveTimer();
-
-void sendDisplaychannelState(bool sendRarely, bool sendFrequently);
-int readScreenRotation();
-bool refreshAnnouncements();
-bool refreshHours();
-void calculateClosingEpochForToday();
-void updateClosingMessageOfTheDay();
-
-void handleOtaProgress(int offset, int totallength);
-const char *getOtaErrorText(int code);
-uint64_t millis64();
-void connectNetwork();
-#if CORE_HAS_ETHERNET
-bool initializeEthernet();
-String getEthernetMacAddress();
-#endif
-String getActiveNetworkInterface();
-void publishMqttstatusMessage(String Topic, String Payload);
-void mfrc630_SPI_transfer(const uint8_t* tx, uint8_t* rx, uint16_t len);
-void mfrc630_SPI_select();
-void mfrc630_SPI_unselect();
-void applyConfigurationJson(const String& json);
-void processConfigurationCommand(String command);
-void printConfigurationHelp();
-String getBaseMacAddress();
-void sendStartupstatusMessage(String statusMessage);
-String calculateSha256(String input);
-void migrateLegacySettings();
-
 //Objects:
+ESPConfig config;
   Preferences settings;
   JsonDocument ConfigJson;
   ESP32OTAPull ota;
@@ -128,13 +97,6 @@ void migrateLegacySettings();
 #if CORE_HAS_ACCELEROMETER
   SPARKFUN_LIS2DH12 accel;
 #endif
-  //USBCDC Serial;
-
-extern "C" bool verifyRollbackLater() {
-  //This code is run to verify the OTA before actual setup.
-  //Since we are handling OTA verification ourselves, we just return true.
-  return true;
-}
 
 NetworkClientSecure networkclient;
 #if !CORE_HAS_LOCAL_AUDIO_VISUAL
@@ -204,6 +166,8 @@ bool resetLed = 0; //Set to 1 to take priority over the LED controller, to indic
 bool unlockedBeep = 0;
 bool singleBeep = 0;
 
+unsigned long long nextConfigUpdate = 0; //Tracks how often we should be updating the config frontend.
+
 ChannelState channels;
 
 //Interrupt Response Mode:
@@ -228,14 +192,6 @@ String hmiDeviceName;
 String hmiRole;
 String stationName;
 
-//Struct for keepalive/ping messages for MQTT.
-struct KeepAlivePing {
-  uint64_t gapTime = 2000; //The time between pings, in milliseconds.
-  uint64_t nextTime = 0; //The next time we should send a ping.
-  uint64_t lastPingTime = 0; //The last time we sent a ping.
-  bool missedPing = false; //Tracks if we missed a ping.
-  bool pingPending = false; //Tracks if we have a ping pending.
-};
 KeepAlivePing keepAlivePing;
 
 void setup() {
@@ -308,7 +264,7 @@ void setup() {
 
   sendStartupstatusMessage("Starting Tasks...");
 
-  xTaskCreate(runAudioVisualController, "runAudioVisualController", 4096, NULL, 5, NULL);
+  xTaskCreate(runAudioVisualController, "runAudioVisualController", 2048, NULL, 5, NULL);
   xTaskCreate(watchRestartButton, "watchRestartButton", 2048, NULL, 5, NULL);
 
   //Start i2C
@@ -387,12 +343,12 @@ void setup() {
 #endif
 
   migrateLegacySettings();
-  xTaskCreate(runConfigurationController, "Configuration", 4096, NULL, 5, NULL);
 
   if(!settings.isKey("net.server")){
     //We don't have a valid config?
     sendStartupstatusMessage("ERROR: Missing Config!");
-    printConfigurationHelp();
+    //Initialize the ESP Configurator:
+    startESPConfig();
     while(1){
       delay(100);
     }
@@ -473,6 +429,9 @@ void setup() {
 
   sendStartupstatusMessage("Settings Loaded.");
 
+  //Initialize the ESP Configurator:
+  startESPConfig();
+
   Serial.println(F("Started Tasks."));
   Serial.flush();
 
@@ -515,8 +474,8 @@ void setup() {
       WiFi.reconnect();
       Serial.println(F("Waiting for first WiFi connect"));
       while (WiFi.status() != WL_CONNECTED && millis64() - WiFiStart < 15000) {
-        Serial.print(".");
-        delay(500);
+        Serial.println(".");
+        delay(2000);
       }
     }
     //Wifi connected.
@@ -764,6 +723,14 @@ void loop() {
 
   delay(10);
 
+  #ifndef REDUCED_CONFIG
+  //Every 5 seconds, update the config:
+  if(millis64() >= nextConfigUpdate){
+    nextConfigUpdate = millis64() + 5000;
+    updateConfig();
+  }
+  #endif
+
   //Ping-related checks;
   if(keepAlivePing.nextTime <= millis64()){
     //It is time to send a ping 
@@ -949,9 +916,7 @@ void loop() {
         infoFields.add("HOBBS_TIME");
       }
       infoFields.add("FLAGS"); //Check our flags, mostly for welcoming
-#ifdef CORE_HAS_SCREEN
       infoFields.add("HMI"); //Request human-readable info for any attached interface.
-#endif
       String InfoPayload;
       serializeJson(outgoing, InfoPayload);
       outgoing.clear();
@@ -1065,6 +1030,12 @@ void loop() {
               //We don't go back to an unlocked state;
               channels.states[id] = "IDLE";
             }
+            #ifndef REDUCED_CONFIG
+            //Also tell the config frontend the state and change reason:
+            String source = "Channel " + String(id);
+            config.updateInformation(source, "channel-state", channels.states[id]);
+            config.updateInformation(source, "channel-reason", "COMMANDED");
+            #endif
           }
         }
         singleBeep = 1;
@@ -1086,11 +1057,19 @@ void loop() {
         hmiRole = incoming["hmi"]["role"].as<String>();
         hmiDeviceName = incoming["hmi"]["deviceName"].as<String>();
         hmiMakerspace = incoming["hmi"]["makerspace"].as<String>();
-        JsonArray channels = incoming["hmi"]["channels"];
-        for (JsonObject channel : channels){
+        JsonArray channelsArray = incoming["hmi"]["channels"];
+        for (JsonObject channel : channelsArray){
           int channelID = channel["channelID"];
           hmiMachineNames[channelID] = channel["pairedEntity"].as<String>();
         }
+        #ifndef REDUCED_CONFIG
+        //Update the frontend with the new info;
+        config.updateInformation("Device", "makerspace", hmiMakerspace);
+        for(int i = 0; i <= channels.count; i++){
+          String source = "Channel " + String(i);
+          config.updateInformation(source, "channel-equipment", hmiMachineNames[i]);
+        }
+        #endif
       }
       //Set the time;
       if(incoming.containsKey("time")){
@@ -1160,6 +1139,12 @@ void loop() {
             if(channels.states[ch] == "UNLOCKED" && !cardPresent){
               channels.states[ch] = "IDLE";
             }
+            #ifndef REDUCED_CONFIG
+            //Also tell the config frontend the state and change reason:
+            String source = "Channel " + String(ch);
+            config.updateInformation(source, "channel-state", channels.states[ch]);
+            config.updateInformation(source, "channel-reason", "COMMANDED");
+            #endif
             channels.changeReasons[ch] = "COMMANDED";
           }
         }
@@ -1265,882 +1250,3 @@ void loop() {
     
 }
 
-void handleOtaProgress(int offset, int totallength) {
-  //Used to display percentage of OTA installation
-
-  static int prev_percent = -1;
-  int percent = 100 * offset / totallength;
-  if (percent != prev_percent) {
-    Serial.printf("Updating %d of %d (%02d%%)...\n", offset, totallength, 100 * offset / totallength);
-    prev_percent = percent;
-    //We should also send it to any attached screen;
-    JsonDocument CoreOTA;
-    CoreOTA["coreOta"] = percent;
-    String CoreOTAString;
-    serializeJson(CoreOTA, CoreOTAString);
-  #if CORE_HAS_SCREEN
-    Serial0.println(CoreOTAString);
-  #endif
-  }
-}
-
-const char *getOtaErrorText(int code) {
-  //Deciphers OTA code response
-  switch (code) {
-    case ESP32OTAPull::UPDATE_AVAILABLE:
-      return "An update is available but wasn't installed";
-    case ESP32OTAPull::NO_UPDATE_PROFILE_FOUND:
-      return "No profile matches";
-    case ESP32OTAPull::NO_UPDATE_AVAILABLE:
-      return "Profile matched, but update not applicable";
-    case ESP32OTAPull::UPDATE_OK:
-      return "An update was done, but no reboot";
-    case ESP32OTAPull::HTTP_FAILED:
-      return "HTTP GET failure";
-    case ESP32OTAPull::WRITE_ERROR:
-      return "Write error";
-    case ESP32OTAPull::JSON_PROBLEM:
-      return "Invalid JSON";
-    case ESP32OTAPull::OTA_UPDATE_FAIL:
-      return "Update fail (no OTA partition?)";
-    default:
-      if (code > 0)
-        return "Unexpected HTTP response code";
-      break;
-  }
-  return "Unknown error";
-}
-
-uint64_t millis64(){
-  //This simple function replaces the 32 bit default millis. Means that overflow now occurs in 290,000 years instead of 50 days
-  //Timer runs in microseocnds, so divide by 1000 to get millis.
-  return esp_timer_get_time() / 1000;
-}
-
-void connectNetwork(){
-  byte TLSRetryCount = 0; //Tracks how many failed TLS attempts we had in a row.
-  retryNetwork:
-
-  //First, figure out if we should be using ethernet or wifi
-
-  bool useEthernet = false;
-
-  #if CORE_HAS_ETHERNET
-  if(ETH.hasIP()){
-    networkState.transport = NetworkState::Transport::Ethernet;
-    Serial.println(F("Using Ethernet connection."));
-    useEthernet = true;
-    //TODO the rest of the ethernet connect code, if any?
-  }
-  #endif
-  
-  bool wifiIssue = false;
-  if(!useEthernet){
-    //Using WIFI:
-    networkState.transport = NetworkState::Transport::WiFi;
-    //Should not need to restart the WiFi.
-    //WiFi.mode(WIFI_STA);
-    //WiFi.begin(networkConfiguration.wifiSsid, networkConfiguration.wifiPassword);
-    if(WiFi.status() != WL_CONNECTED){
-      wifiIssue = true;
-      WiFi.reconnect(); //Force a manual connect attempt
-      Serial.println(F("No WiFi? Waiting for reconnect"));
-      unsigned long long WiFiTime = millis64() + 15000;
-      while(WiFi.status() != WL_CONNECTED){
-        Serial.print(".");
-        delay(500);
-        if(WiFiTime <= millis64()){
-          Serial.println(F("Failed to connect to WiFi! Retrying..."));
-          goto retryNetwork;
-        }
-      }
-      Serial.println(F(" WiFi Connected!"));
-    } else{
-      Serial.println(F("Already had WiFi connection, skipping to websocket connection."));
-    }
-  }
-
-  //Next, check our websocket connection:
-  bool socketIssue = false;
-  bool certIssue = false;
-  if(!socket.isConnected()){
-    //No socket connection?
-    socketIssue = true;
-    socket.disconnect();
-    const char* global_ca_pointer = rootCertificate.c_str();
-    socket.beginSslWithCA(networkConfiguration.serverAddress.c_str(), 443, "/mqtt", global_ca_pointer, "mqtt");
-    //Give the socket some time to stabilize:
-    unsigned long long wsTimeout = millis64() + 5000;
-    while(!socket.isConnected() && millis64() <= wsTimeout){
-      socket.loop();
-      delay(2);
-    }
-    //Did the socket work? If not, it may be a TLS cert issue.
-    if(!socket.isConnected()){
-      Serial.println(F("Websocket connection failed..."));
-      socket.disconnect();
-      //Is the server alive?
-      if(!Ping.ping(networkConfiguration.serverAddress.c_str())){
-        //Server is not responding?
-        Serial.println(F("Cannot ping the server. No network or server unavailable?"));
-        Serial.println(F("Going to retry network altogether..."));
-        goto retryNetwork;
-      } else{
-        Serial.println(F("Server is online. Bad TLS cert?"));
-        Serial.println(F("Trying TLS certs again to make sure..."));
-        if(TLSRetryCount <=5){
-          Serial.print(F("That was attempt: "));
-          Serial.print(TLSRetryCount);
-          Serial.println(F("/5 attempts before we get new certs."));
-          delay(1000);
-          TLSRetryCount++;
-          goto retryNetwork;
-        }
-        //The issue is probably the certs?
-        socketIssue = false;
-        certIssue = true;
-        Serial.println(F("Getting new TLS certs from server."));
-        networkclient.setInsecure();
-        networkclient.connect(networkConfiguration.serverAddress.c_str(), 443);
-        
-        networkclient.print("GET /api/rootCA HTTP/1.1\r\n");
-        networkclient.print("Host: ");
-        networkclient.print(networkConfiguration.serverAddress.c_str());
-        networkclient.print("\r\n");
-
-        networkclient.print("shlug-sn: ");
-        networkclient.print(serialNumber.c_str());
-        networkclient.print("\r\n");
-        
-        networkclient.print("Connection: close\r\n");
-        
-        // End of headers boundary
-        networkclient.print("\r\n");
-
-        while (networkclient.connected()) {
-          String line = networkclient.readStringUntil('\n');
-          if (line == "\r") {
-            Serial.println("Headers received, body:");
-            break;
-          }
-        }
-        unsigned long timeout = millis();
-        while (networkclient.available() == 0) {
-          if (millis() - timeout > 5000) { // 5 second timeout
-            Serial.println("!!! Client Timeout awaiting body! !!!");
-            networkclient.stop();
-            return;
-          }
-          delay(10); 
-          networkState.unavailable = true;
-          goto retryNetwork;
-        }
-
-        // The body is a JSON, let's capture it in a string.
-        String TLSPayload;
-        while(networkclient.available()){
-          char c = networkclient.read();
-          TLSPayload += c;
-        }
-        
-        Serial.println(TLSPayload);
-        networkclient.stop(); // Always close the socket when finished!
-
-        //Parse the JSON payload
-        JsonDocument TLSJson;
-        deserializeJson(TLSJson, TLSPayload);
-        //Before we accept the new cert, we should check the SHA-256
-        String SHATLS = TLSJson["sha"];
-        String NewCert = TLSJson["cert"];
-        //The SHA is the hash of "[serialNumber]:[wifiPassword]:[Cert]""
-        Serial.print(F("JSON Hash:       ")); Serial.println(SHATLS);
-        Serial.print(F("Calculated Hash: ")); Serial.println(calculateSha256(serialNumber + ":" + networkConfiguration.mqttKey + ":" + NewCert));
-        if(SHATLS.equalsIgnoreCase(calculateSha256(serialNumber + ":" + networkConfiguration.mqttKey + ":" + NewCert))){
-        //The hashes match!
-        Serial.println(F("TLS cert was verified. Saving to memory..."));
-        SPIFFS.remove("/cert.txt");
-        File file = SPIFFS.open("/cert.txt", FILE_WRITE);
-        //Need to change the written /n to an actual newline, clean up any other oddities in the file:
-        NewCert.replace("\\n","\n");
-        NewCert.replace("\r","");
-        NewCert.replace("\"","");
-        NewCert.trim();
-        NewCert += "\n";
-        if(file.print(NewCert)){
-          file.close();
-          rootCertificate = NewCert;
-          Serial.println(F("New cert has been saved. Regular operation can now resume."));
-          Serial.println(F("Our new cert is:"));
-          Serial.println(rootCertificate);
-          Serial.flush();
-          delay(10);
-          goto retryNetwork;
-        } else{
-          networkState.unavailable = true;
-          Serial.println(F("Unknown error, could not write new cert to file?"));
-          goto retryNetwork;
-        }
-
-        } else{
-          //The hashes did not match, potental attack in progress!
-          networkState.unavailable = true;
-          faultReason = "TLS hash does not match!";
-          Serial.println(F("CRITICAL ERROR: ATTEMPT WAS MADE TO LOAD BAD TLS CERTS!"));
-          //statusMessage = "Attmpted to load cert with bad hash?";
-          //messageToSend = true;
-          delay(1000);
-          goto retryNetwork;
-        }
-      }
-    } //If not this, the connection worked and we can continue.
-    socket.setReconnectInterval(2000); //Attempt to reconnect every 2 seconds if we lose connection
-    Serial.println(F("Websocket Connected."));
-  } else{
-    Serial.println(F("Websocket OK."));
-  }
-
-  //Lastly, let's check out mqtt connection:
-  Serial.println(F("Connecting MQTT..."));
-  bool mqttIssue = false;
-  if(!mqtt.isConnected()){
-    //MQTT is not connected. Reconnect.
-    mqttIssue = true;
-    unsigned long long mqttTime = millis64() + 15000;
-    while(!mqtt.connect(serialNumber, serialNumber, networkConfiguration.mqttKey)){ //Use serial number as unique ID, username, and key as password.
-      Serial.print(".");
-      socket.loop();
-      delay(500);
-      if(mqttTime <= millis64()){
-        Serial.println(F("Failed to connect to mqtt broker! Retrying network altogether..."));
-        goto retryNetwork;
-      }
-    } 
-    Serial.println(F(" MQTT Connected!"));
-  } else{
-    Serial.println(F("MQTT was already connected."));
-  }
-
-  //Let's figure out why we had to do a reconnect.
-  //wifiIssue, socketIssue, certIssue, mqttIssue
-  String connectBlame;
-  if(wifiIssue){
-    //Issue was caused by wifi
-    connectBlame = "WiFi";
-  } else if(certIssue){
-    //Issue was caused by cert
-    connectBlame = "TLS Cert";
-  } else if(socketIssue){
-    //Issue was caused by socket
-    connectBlame = "Websocket";
-  } else if(mqttIssue){
-    //Issue was caused by mqtt
-    connectBlame = "MQTT";
-  } else{
-    //Unknown issue?
-    connectBlame = "Unknown";
-  }
-
-  //Subscribe to all MQTT topics relevant to us;
-  mqttState.baseTopic = "makerspace/device/" + serialNumber;
-  String SubAuth = mqttState.baseTopic + "/authTo/response";
-  mqtt.subscribe(SubAuth, 2, [](const String& payload, const size_t size) {
-    Serial.print(F("AuthTo Response: "));
-    Serial.println(payload);
-    mqttState.authResponse = payload;
-    mqttState.newAuth = true;
-    resetKeepAliveTimer();
-      
-  });
-  String SubInfo = mqttState.baseTopic + "/info/response";
-  mqtt.subscribe(SubInfo, 2, [](const String& payload, const size_t size) {
-    Serial.print(F("Info Response: "));
-    Serial.println(payload);
-    mqttState.infoResponse = payload;
-    mqttState.newInfo = true;
-    resetKeepAliveTimer();
-  });
-  String SubCommand = mqttState.baseTopic + "/command";
-  mqtt.subscribe(SubCommand, 2, [](const String& payload, const size_t size) {
-    Serial.print(F("Command Input: "));
-    Serial.println(payload);
-    mqttState.commandResponse = payload;
-    mqttState.newCommand = true;
-    resetKeepAliveTimer();
-  });
-  String SubWelcome = mqttState.baseTopic + "/welcome/response";
-  mqtt.subscribe(SubWelcome, 2, [](const String& payload, const size_t size) {
-    Serial.print(F("Welcome Response: "));
-    Serial.println(payload);
-    mqttState.welcomeResponse = payload;
-    mqttState.newWelcome = true;
-    resetKeepAliveTimer();
-  });
-  String SubPing = mqttState.baseTopic + "/ping";
-  mqtt.subscribe(SubPing, 2, [](const String& payload, const size_t size) {
-    //Serial.println(F("Ping Loopback."));
-    resetKeepAliveTimer();
-  });
-
-  //We should request and report things when we (re)connect
-  mqttState.reportConfig = true;
-  mqttState.requestInfo = true;
-  JsonDocument NetConnect;
-  NetConnect["status"] = "connected";
-  //Check the interface in use
-  bool usingWifi = false;
-  #if CORE_HAS_ETHERNET
-  if(ETH.hasIP()){
-    NetConnect["interface"] = "ethernet";
-    //TODO add ethernet IP to payload
-  } else{
-    NetConnect["interface"] = "wifi";
-  }
-  #else
-    NetConnect["interface"] = "wifi";
-    usingWifi = true;
-  #endif
-  //If we are using wifi, add more info;
-  if(usingWifi){
-    NetConnect["ssid"] = networkConfiguration.wifiSsid;
-    NetConnect["bssid"] = WiFi.BSSIDstr();
-    NetConnect["rssi"] = WiFi.RSSI();
-    NetConnect["channel"] = WiFi.channel();
-    NetConnect["ip"] = WiFi.localIP();
-    //NEW: Add the disconnect reasons
-    if(lastDisconnectReason != 0 && connectBlame == "WiFi"){
-      //If 0, we just reconnected no need to send this.
-      //We also do not need to send unless the disconnect reason was the Wifi.
-      NetConnect["disconnectReason"] = lastDisconnectReason;
-      NetConnect["disconnectReasonString"] = lastDisconnectReasonVerbose;
-    }
-  }
-  lastDisconnectReason = 0; //Reset the reason
-  NetConnect["sys_uptime"] = millis64() / 1000;
-  NetConnect["net_uptime"] = (millis64() - lastReconnectTime) / 1000;
-  lastReconnectTime = millis64();
-  //What went wrong that resulted in using having to do a reconnect?
-  NetConnect["connectBlame"] = connectBlame;
-  String netPayload;
-  serializeJson(NetConnect, netPayload);
-  //If there is another log pending to send, do not overwrite it;
-  if(!mqttState.logToSend){
-    mqttState.logType = "network-info";
-    mqttState.logMessage = netPayload;
-    mqttState.logToSend = true;
-  }
-  //Send a ping on connect:
-  String PingTopic = mqttState.baseTopic + "/ping";
-  publishMqttstatusMessage(PingTopic, "Ping!");
-  resetKeepAliveTimer();
-  Serial.println(F("Network connected."));
-}
-
-#if CORE_HAS_ETHERNET
-void deriveEthernetMac(uint8_t macAddress[6]) {
-  esp_read_mac(macAddress, ESP_MAC_WIFI_STA);
-  for (int index = 5; index >= 0; index--) {
-    if (++macAddress[index] != 0) {
-      break;
-    }
-  }
-}
-
-String formatMacAddress(const uint8_t macAddress[6]) {
-  char macString[18];
-  snprintf(
-    macString,
-    sizeof(macString),
-    "%02X:%02X:%02X:%02X:%02X:%02X",
-    macAddress[0], macAddress[1], macAddress[2], macAddress[3], macAddress[4], macAddress[5]
-  );
-  return String(macString);
-}
-
-void setW5500MacAddress(const uint8_t macAddress[6]) {
-  SPI.beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
-  digitalWrite(PIN_ETH_CS, LOW);
-  SPI.transfer(0x00);
-  SPI.transfer(0x09);
-  SPI.transfer(0x04);
-  for (int index = 0; index < 6; index++) {
-    SPI.transfer(macAddress[index]);
-  }
-  digitalWrite(PIN_ETH_CS, HIGH);
-  SPI.endTransaction();
-}
-
-bool initializeEthernet() {
-  uint8_t ethernetMac[6];
-  deriveEthernetMac(ethernetMac);
-
-  if (!ETH.begin(ETH_PHY_W5500, 1, PIN_ETH_CS, PIN_ETH_INT, PIN_ETH_RST, SPI)) {
-    Serial.println(F("W5500 initialization failed; using WiFi."));
-    return false;
-  }
-
-  setW5500MacAddress(ethernetMac);
-  const unsigned long long ethernetDeadline = millis64() + 5000;
-  while (!ETH.hasIP() && millis64() < ethernetDeadline) {
-    delay(50);
-  }
-
-  if (!ETH.hasIP()) {
-    Serial.println(F("W5500 has no IP address; using WiFi."));
-    return false;
-  }
-
-  Serial.print(F("W5500 IP address: "));
-  Serial.println(ETH.localIP());
-  return true;
-}
-
-String getEthernetMacAddress() {
-  uint8_t ethernetMac[6];
-  deriveEthernetMac(ethernetMac);
-  return formatMacAddress(ethernetMac);
-}
-#endif
-
-String getActiveNetworkInterface() {
-  if (networkState.transport == NetworkState::Transport::Ethernet) {
-    return "Ethernet";
-  }
-  if (networkState.transport == NetworkState::Transport::WiFi) {
-    return "WiFi: " + networkConfiguration.wifiSsid;
-  }
-  return "None";
-}
-
-void publishMqttstatusMessage(String Topic, String Payload){
-  if(Payload != "Ping!"){
-    //No point in printing the ping payload constantly
-    Serial.print(F("Publishing "));
-    Serial.print(Payload);
-    Serial.print(F(" to topic "));
-    Serial.println(Topic);
-  }
-  mqtt.publish(Topic, Payload, false, 2); //Send not retained at QoS 2
-}
-
-// Implement the HAL functions on an Arduino compatible system.
-void mfrc630_SPI_transfer(const uint8_t* tx, uint8_t* rx, uint16_t len) {
-  for (uint16_t i=0; i < len; i++){
-    rx[i] = SPI.transfer(tx[i]);
-  }
-}
-
-// Select the chip and start an SPI transaction.
-void mfrc630_SPI_select() {
-  SPI.beginTransaction(SPISettings(2000000, MSBFIRST, SPI_MODE0));  // gain control of SPI bus
-  digitalWrite(PIN_NFC_CS, LOW);
-}
-
-// Unselect the chip and end the transaction.
-void mfrc630_SPI_unselect() {
-  digitalWrite(PIN_NFC_CS, HIGH);
-  SPI.endTransaction();    // release the SPI bus
-}
-
-void applyConfigurationJson(const String& json) {
-    String USBConfig = json;
-    JsonDocument ConfigJson;
-    DeserializationError error = deserializeJson(ConfigJson, USBConfig);
-    if (error) {
-      Serial.print(F("Configuration JSON parsing failed: "));
-      Serial.println(error.c_str());
-      return;
-    }
-    //Is this a Core Config JSON, or a OneWire Config JSON?
-    if(ConfigJson["Type"] == "OneWire"){
-      //This is a onewire json, let's tell the bus manager to handle it.
-      configOneWire = true;
-      return;
-    }
-    String NewSSID = ConfigJson["wifiSsid"];
-    if(ConfigJson["wifiSsid"].is<String>()){
-      Serial.print(F("Set WiFi wifiSsid to: "));
-      Serial.println(NewSSID);
-      settings.putString("net.ssid", NewSSID);
-    } else{
-      Serial.println(F("Kept old WiFi wifiSsid."));
-    }
-    String NewPassword = ConfigJson["wifiPassword"];
-    if(ConfigJson["wifiPassword"].is<String>()){
-      Serial.print(F("Set WiFi password to: "));
-      Serial.println(NewPassword);
-      settings.putString("net.password", NewPassword);
-    } else{
-      Serial.println(F("Kept old WiFi password."));
-    }
-    String NewServer = ConfigJson["serverAddress"];
-    if(ConfigJson["serverAddress"].is<String>()){
-      Serial.print(F("Set server to: "));
-      Serial.println(NewServer);
-      settings.putString("net.server", NewServer);
-    } else{
-      Serial.println(F("Kept old server."));
-    }
-    String NewKey = ConfigJson["mqttKey"];
-    if(ConfigJson["mqttKey"].is<String>()){
-      Serial.println(F("Set a new key (not printed for security)"));
-      settings.putString("net.mqttKey", NewKey);
-    } else{
-      Serial.println(F("Kept old key."));
-    }
-    String NewTimezone = ConfigJson["Timezone"];
-    if(ConfigJson["Timezone"].is<String>()){
-      Serial.print(F("Set timezone to: "));
-      Serial.println(NewTimezone);
-      settings.putString("system.timezone", NewTimezone);
-    } else{
-      Serial.println(F("Kept old timezone."));
-    }
-    String NewMakerspaceID = ConfigJson["makerspaceId"];
-    if(ConfigJson["makerspaceId"].is<String>()){
-      Serial.print(F("Set makerspace ID to: "));
-      Serial.println(NewMakerspaceID);
-      settings.putString("makerspace.id", NewMakerspaceID);
-    } else{
-      Serial.println(F("Kept old makerspace ID."));
-    }
-    String NewChannelCount = ConfigJson["channelCount"];
-    if(ConfigJson["channelCount"].is<String>()){
-      Serial.print(F("Set Channel Count to: "));
-      Serial.println(NewChannelCount);
-      settings.putString("channels.count", NewChannelCount);
-    } else{
-      Serial.println(F("Kept old channelCount."));
-    }
-    String NewInputMode = ConfigJson["inputMode"];
-    if(ConfigJson["inputMode"].is<String>()){
-      Serial.print(F("Set inputMode to: "));
-      Serial.println(NewInputMode);
-      settings.putString("access.input", NewInputMode);
-    } else{
-      Serial.println(F("Kept old inputMode"));
-    }
-    String NewStationName = ConfigJson["stationName"];
-    if(ConfigJson["stationName"].is<String>()){
-      Serial.print(F("Set Station Name to: "));
-      Serial.println(NewStationName);
-      settings.putString("station.name", NewStationName);
-    } else{
-      Serial.println(F("Kept old stationName"));
-    }
-    int NewMakerspaceNumber = ConfigJson["MakerspaceNumber"];
-    if(ConfigJson["MakerspaceNumber"].is<int>()){
-      Serial.println(F("Set makerspace number to: "));
-      Serial.println(NewMakerspaceNumber);
-      settings.putInt("makerspace.num", NewMakerspaceNumber);
-    } else{
-      Serial.println(F("Kept old MakerspaceNumber."));
-    }
-    String NewInterruptResponse = ConfigJson["interruptResponse"];
-    if(ConfigJson["interruptResponse"].is<String>()){
-      Serial.print(F("Set interrupt response to: "));
-      Serial.println(NewInterruptResponse);
-      settings.putString("access.intResp", NewInterruptResponse);
-    } else{
-      Serial.println(F("Kept old interruptResponse."));
-    }
-    if (ConfigJson["tapDuration"].is<JsonArray>()) {
-      JsonArray durations = ConfigJson["tapDuration"].as<JsonArray>();
-
-      if (durations.size() == 4) {
-        Serial.print(F("Set Tap Durations (seconds) to: ["));
-        for (int i = 0; i < 4; i++) {
-          uint32_t dur = durations[i].as<uint32_t>();
-          
-          // Unique key for each channel (e.g. "TapDur0", "TapDur1"...)
-          // Note: ESP32 Preferences keys must be 15 characters or less
-          String key = "channels.tap" + String(i);
-          settings.putUInt(key.c_str(), dur);
-
-          Serial.print(dur);
-          if (i < 3) Serial.print(F(", "));
-        }
-        Serial.println(F("]"));
-      } else {
-        Serial.println(F("Error: tapDuration must contain exactly 4 values. Kept old values."));
-      }
-    } else {
-      Serial.println(F("Kept old tapDuration."));
-    }
-    Serial.println(F("Above settings have been saved to memory. Restart device to apply settings."));
-}
-
-void printConfigurationHelp() {
-  Serial.println(F("Configuration commands: h, help, ?, restart, wipeOffline, or a JSON object."));
-  Serial.print(F("Device serial number: "));
-  Serial.println(serialNumber);
-  Serial.print(F("Device WiFi MAC address: "));
-  Serial.println(getBaseMacAddress());
-  Serial.println(F("JSON format:"));
-  Serial.println(F("{\"wifiSsid\":\"network\",\"wifiPassword\":\"password\",\"serverAddress\":\"host\",\"mqttKey\":\"key\",\"Timezone\":\"-4\",\"makerspaceId\":\"36\",\"channelCount\":\"1\",\"inputMode\":\"INSERT\",\"stationName\":\"Machine\",\"MakerspaceNumber\":36,\"interruptResponse\":\"FAULT\",\"tapDuration\":[0,0,0,0]}"));
-}
-
-void processConfigurationCommand(String command) {
-  command.trim();
-  if (command.length() == 0) {
-    return;
-  }
-
-  String normalizedCommand = command;
-  normalizedCommand.toLowerCase();
-  if (normalizedCommand == "h" || normalizedCommand == "help" || normalizedCommand == "?") {
-    printConfigurationHelp();
-    return;
-  }
-  if (normalizedCommand == "wipeoffline"){
-    //Wipe the offline lists
-    deleteListFromSPIFFS();
-  }
-
-  if (normalizedCommand == "restart") {
-    systemState.resetReason = "Serial Configuration Command";
-    systemState.requestReset = true;
-    Serial.println(F("Restart requested."));
-    return;
-  }
-
-  if (command.startsWith("{")) {
-    applyConfigurationJson(command);
-    return;
-  }
-
-  Serial.println(F("Unknown configuration command. Send h for help."));
-}
-
-void runConfigurationController(void *pvParameters) {
-  String input;
-  unsigned long long lastInputTime = 0;
-
-  Serial.println(F("Configuration controller started."));
-  while (true) {
-    while (Serial.available() > 0) {
-      char character = static_cast<char>(Serial.read());
-      if (character == '\n' || character == '\r') {
-        processConfigurationCommand(input);
-        input = "";
-      } else {
-        input += character;
-        lastInputTime = millis64();
-      }
-    }
-
-    if (input.length() > 0 && millis64() - lastInputTime >= 50) {
-      processConfigurationCommand(input);
-      input = "";
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-}
-
-void migrateLegacySettings() {
-  struct LegacySetting {
-    const char* currentKey;
-    const char* legacyKey;
-  };
-
-  const LegacySetting settingsToMigrate[] = {
-    {"net.server", "Server"},
-    {"net.server", "serverAddress"},
-    {"net.password", "Password"},
-    {"net.password", "wifiPassword"},
-    {"net.ssid", "SSID"},
-    {"net.ssid", "wifiSsid"},
-    {"net.mqttKey", "Key"},
-    {"net.mqttKey", "mqttKey"},
-    {"channels.count", "ChannelCount"},
-    {"channels.count", "channelCount"},
-    {"hardware.ver", "HWVer"},
-    {"access.input", "InputMode"},
-    {"access.input", "inputMode"},
-    {"access.intResp", "IntResp"},
-    {"access.intResp", "InterruptResponse"},
-    {"station.name", "StationName"},
-    {"station.name", "stationName"},
-    {"system.timezone", "Timezone"},
-    {"system.timezone", "timezone"},
-    {"makerspace.id", "MakerspaceID"},
-    {"makerspace.id", "makerspaceId"},
-    {"system.reset", "ResetReason"},
-    {"system.reset", "resetReason"},
-  };
-
-  for (const LegacySetting& setting : settingsToMigrate) {
-    if (!settings.isKey(setting.currentKey) && settings.isKey(setting.legacyKey)) {
-      settings.putString(setting.currentKey, settings.getString(setting.legacyKey));
-    }
-  }
-
-  if (!settings.isKey("makerspace.num") && settings.isKey("SpaceNum")) {
-    settings.putInt("makerspace.num", settings.getInt("SpaceNum"));
-  }
-  if (!settings.isKey("makerspace.num") && settings.isKey("MakerspaceNumber")) {
-    settings.putInt("makerspace.num", settings.getInt("MakerspaceNumber"));
-  }
-
-  for (int channel = 0; channel < ChannelState::kMaximumChannels; channel++) {
-    String currentKey = "channels.tap" + String(channel);
-    String legacyKey = "TapDur" + String(channel);
-    if (!settings.isKey(currentKey.c_str()) && settings.isKey(legacyKey.c_str())) {
-      settings.putUInt(currentKey.c_str(), settings.getUInt(legacyKey.c_str()));
-    }
-    legacyKey = "TapDuration" + String(channel);
-    if (!settings.isKey(currentKey.c_str()) && settings.isKey(legacyKey.c_str())) {
-      settings.putUInt(currentKey.c_str(), settings.getUInt(legacyKey.c_str()));
-    }
-  }
-}
-
-String getBaseMacAddress() {
-  uint8_t baseMac[6];
-  char macStr[18]; 
-
-  // We use (esp_mac_type_t) to force compatibility with the interface constant
-  // If ESP_IF_WIFI_STA still fails, you can try 0 (which is the index for STA)
-  if (esp_read_mac(baseMac, (esp_mac_type_t)ESP_IF_WIFI_STA) == ESP_OK) {
-    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-             baseMac[0], baseMac[1], baseMac[2], 
-             baseMac[3], baseMac[4], baseMac[5]);
-    return String(macStr);
-  } else {
-    return String("00:00:00:00:00:00");
-  }
-}
-
-void sendStartupstatusMessage(String statusMessage){
-#if CORE_HAS_SCREEN
-  JsonDocument Startup;
-  Startup["startupMessage"] = statusMessage;
-  String StartMessageString;
-  serializeJson(Startup, StartMessageString);
-  Serial0.println(StartMessageString);
-  Serial0.flush();
-#else
-  (void)statusMessage;
-#endif
-}
-
-String calculateSha256(String input) {
-  // Create a buffer to hold the 32-byte (256-bit) hash output
-  byte shaResult[32];
-  
-  // Initialize the mbedTLS message digest context
-  mbedtls_md_context_t ctx;
-  mbedtls_md_type_t md_type = MBEDTLS_MD_SHA256;
-  
-  mbedtls_md_init(&ctx);
-  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(md_type), 0);
-  mbedtls_md_starts(&ctx);
-  
-  // Provide the input string and its length to the hash function
-  mbedtls_md_update(&ctx, (const unsigned char*) input.c_str(), input.length());
-  
-  // Finalize the hash computation and store it in shaResult
-  mbedtls_md_finish(&ctx, shaResult);
-  mbedtls_md_free(&ctx);
-  
-  // Convert the 32-byte binary hash into a readable Hex String
-  String hashStr = "";
-  for(int i=0; i<32; i++) {
-    if(shaResult[i] < 16) {
-      hashStr += "0"; // Add leading zero for single-digit hex values
-    }
-    hashStr += String(shaResult[i], HEX);
-  }
-  
-  return hashStr;
-}
-
-void IRAM_ATTR updateHobbsCounter(void* arg) {
-  //This is called in an ISR to increment the Hobbs timer very precisely!
-  for(int i = 0; i < channels.count; i++){
-    if(channels.access[i]){
-      channels.hobbsSeconds[i] = channels.hobbsSeconds[i] + 1;
-    }
-  }
-}
-
-String disconnectReasonToString(uint8_t reason) {
-  switch (reason) {
-    case 0: return "STARTUP";
-    case 1: return "UNSPECIFIED";
-    case 2: return "AUTH_EXPIRE";
-    case 3: return "AUTH_LEAVE";
-    case 4: return "DISASSOC_DUE_TO_INACTIVITY";
-    case 5: return "ASSOC_TOOMANY";
-    case 6: return "CLASS2_FRAME_FROM_NONAUTH_STA";
-    case 7: return "CLASS3_FRAME_FROM_NONASSOC_STA";
-    case 8: return "ASSOC_LEAVE";
-    case 9: return "ASSOC_NOT_AUTHED";
-    case 10: return "DISASSOC_PWRCAP_BAD";
-    case 11: return "DISASSOC_SUPCHAN_BAD";
-    case 12: return "BSS_TRANSITION_DISASSOC";
-    case 13: return "IE_INVALID";
-    case 14: return "MIC_FAILURE";
-    case 15: return "4WAY_HANDSHAKE_TIMEOUT";
-    case 16: return "GROUP_KEY_UPDATE_TIMEOUT";
-    case 17: return "IE_IN_4WAY_DIFFERS";
-    case 18: return "GROUP_CIPHER_INVALID";
-    case 19: return "PAIRWISE_CIPHER_INVALID";
-    case 20: return "AKMP_INVALID";
-    case 21: return "UNSUPP_RSN_IE_VERSION";
-    case 22: return "INVALID_RSN_IE_CAP";
-    case 23: return "802_1X_AUTH_FAILED";
-    case 24: return "CIPHER_SUITE_REJECTED";
-    case 25: return "TDLS_PEER_UNREACHABLE";
-    case 26: return "TDLS_UNSPECIFIED";
-    case 27: return "SSP_REQUESTED_DISASSOC";
-    case 28: return "NO_SSP_ROAMING_AGREEMENT";
-    case 29: return "BAD_CIPHER_OR_AKM";
-    case 30: return "NOT_AUTHORIZED_THIS_LOCATION";
-    case 31: return "SERVICE_CHANGE_PRECLUDES_TS";
-    case 32: return "UNSPECIFIED_QOS_REASON";
-    case 33: return "NOT_ENOUGH_BANDWIDTH";
-    case 34: return "DISASSOC_LOW_ACK";
-    case 35: return "EXCEEDED_TXOP";
-    case 36: return "STA_LEAVING";
-    case 37: return "END_TS_BA_DLS";
-    case 38: return "UNKNOWN_TS_BA";
-    case 39: return "TIMEOUT";
-    case 46: return "PEERKEY_MISMATCH";
-    case 47: return "AUTHORIZED_ACCESS_LIMIT_REACHED";
-    case 48: return "UNKNOWN_BSS_TRANSITION_MANAGEMENT_PARAM";
-    case 49: return "INVALID_PMKID";
-    case 50: return "INVALID_MDE";
-    case 51: return "INVALID_FTE";
-    case 67: return "TRANSMISSION_LINK_ESTABLISH_FAILED";
-    case 68: return "ALTERATIVE_CHANNEL_OCCUPIED";
-
-    //Special case; reports when a disconnect was not Wifi based.
-    case 99: return "NOMINAL_WIFI";
-
-    // ESP32 Specific Error Codes
-    case 200: return "BEACON_TIMEOUT";
-    case 201: return "NO_AP_FOUND";
-    case 202: return "AUTH_FAIL";
-    case 203: return "ASSOC_FAIL";
-    case 204: return "HANDSHAKE_TIMEOUT";
-    case 205: return "CONNECTION_FAIL";
-    case 206: return "AP_TSF_RESET";
-    case 207: return "ROAMING";
-    case 208: return "ASSOC_COMEBACK_TIME_TOO_LONG";
-    case 209: return "SA_QUERY_TIMEOUT";
-    case 210: return "NO_AP_FOUND_W_COMPATIBLE_SECURITY";
-    case 211: return "NO_AP_FOUND_IN_AUTHMODE_THRESHOLD";
-    case 212: return "NO_AP_FOUND_IN_RSSI_THRESHOLD";
-    
-    default: return String("UNKNOWN_") + String(reason);
-  }
-}
-
-void resetKeepAliveTimer(){
-  //Simple function that defers the time to send a ping, called when we get an MQTT payload.
-  keepAlivePing.nextTime = millis64() + keepAlivePing.gapTime;
-  keepAlivePing.missedPing = false; //We got something, so clear the missed ping flag.
-  keepAlivePing.pingPending = false; //We got something, so clear the missed ping flag.
-  networkState.unavailable = false; //We got something, so we must have a network connection.
-}

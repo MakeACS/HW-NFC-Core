@@ -251,6 +251,10 @@ void runMachineStateLoop(void *pvParameters){
           currentUserUid = detectedUid;
           cardRead = true;
           user.inOfflineList = checkOfflineList(currentUserUid);
+          #ifndef REDUCED_CONFIG
+          //Update the config frontend
+          config.updateInformation("General", "current-card", currentUserUid);
+          #endif
         } else{
           //We have a card present, but we cannot read it. This is likely a bad card or a bad read. 
           //We should deny the user and beep.
@@ -308,6 +312,10 @@ void runMachineStateLoop(void *pvParameters){
         mqttState.welcomingPending = false;
         userWelcomed = 0;
         accessDenied = 0;
+        #ifndef REDUCED_CONFIG
+        //Update the config frontend
+        config.updateInformation("General", "current-card", currentUserUid);
+        #endif
       }
     } else{ //INSERT
       //In INSERT mode, we detect this based on switches
@@ -322,6 +330,10 @@ void runMachineStateLoop(void *pvParameters){
         pendingApproval = false;
         accessDenied = false;
         user.inOfflineList = false;
+        #ifndef REDUCED_CONFIG
+        //Update the config frontend
+        config.updateInformation("General", "current-card", "Waiting...");
+        #endif
         for(int i = 0; i < channels.count; i++){
           if(channels.states[i] == "UNLOCKED"){
             channels.states[i] = "IDLE";
@@ -386,7 +398,7 @@ void runMachineStateLoop(void *pvParameters){
     #endif
     }
     if(TellUpdateScreen){
-      //A channels.access state changed, update the screen
+      //A channels access state changed, update the screen
       updateScreen = true;
     }
     //Set the GPIO of the bus based on channels.access
@@ -410,6 +422,12 @@ void runMachineStateLoop(void *pvParameters){
         if(channels.lastStates[i] != "UNKNOWN"){
           //The state changed for something other than setting back from unkown, we should send it.
           SendStateChange = true;
+          #ifndef REDUCED_CONFIG
+          //Also tell the config frontend the state and change reason:
+          String source = "Channel " + String(i);
+          config.updateInformation(source, "channel-state", channels.states[i]);
+          config.updateInformation(source, "channel-reason", channels.changeReasons[i]);
+          #endif
         }
         channels.lastStates[i] = channels.states[i]; //Override channels.lastStates with channels.states
       }

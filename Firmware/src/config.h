@@ -97,7 +97,7 @@ void startESPConfig(){
     if(CORE_MAX_CHANNELS > 1){
         config.addInformation("General", "station-name", "Access Control", "Station Name", stationName, "Station name is used to name the deployment when multiple pieces of equipment are attached.");
     }
-    config.addInformation("General", "mode", "Access Control", "Mode", "Loading...", "How the Core handles when a card is presented/inserted.");
+    config.addInformation("General", "mode", "Access Control", "Mode", inputMode, "How the Core handles when a card is presented/inserted.");
     config.addInformation("General", "current-card", "Access Control", "Current Card", "Waiting...", "The currently inserted/detected card in/on the Core");
     config.addInformation("General", "channel-count", "Access Control", "Channel Count", String(channels.count), "How many access control channels the Core controls.");
     //Repeat Channel Information
@@ -110,30 +110,32 @@ void startESPConfig(){
         config.addInformation(source, "channel-hobbs", "Access Control", "Hobbs Time (hours)", "Loading...", "How long the equipment has been running for in total");
     }
     //Command
-    config.addLatchCommand("", "test-access", "Access Control", "Test Force-On Access Control", testAccess, "WARNING: This will force on all attached equipment until the button is pressed again or the Core is restarted!", "Force the Core to turn on all access control channels, for testing.", false, true, false);
+    config.addLatchCommand("Test", "test-access", "Access Control", "Test Force-On Access Control", testAccess, "WARNING: This will force on all attached equipment until the button is pressed again or the Core is restarted!", "Force the Core to turn on all access control channels, for testing.", false, true, false);
     //Settings
-    config.addChoiceQuestion("", "input-mode", "Access Control", "Set the input mode", inputMode, {"TEMP_PRESENT", "INSERT"}, setInputMode, true);
-    config.addChoiceQuestion("", "set-interrupt-mode", "Access Control", "Set the interrupt response mode", interruptResponse, {"FAULT", "LOCK_TEMP", "IDLE", "MESSAGE"}, setFaultResp, true, false);
+    config.addChoiceQuestion("Core", "input-mode", "Access Control", "Set the input mode (when not in welcome mode)", defaultInputMode, {"TEMP_PRESENT", "INSERT"}, setInputMode, true);
+    config.addChoiceQuestion("Core", "set-interrupt-mode", "Access Control", "Set the interrupt response mode", interruptResponse, {"FAULT", "LOCK_TEMP", "IDLE", "MESSAGE"}, setFaultResp, true, false);
     if(CORE_MAX_CHANNELS > 1){
         config.addIntegerQuestion("Multi-Channel", "set-channels", "Access Control", "Set the number of access control channels", channels.count, 1, CORE_MAX_CHANNELS, setChannelCount, true);
         config.addStringQuestion("Multi-Channel", "set-station-name", "Access Control", "Set the station name", stationName, 32, setStationName, true);
     }
     //Repeat Tap Duration
+    bool durAvailable = true; //Inverted logic
     if(inputMode != "INSERT"){
-        //Need to go through and add questions based on number of channels manually
-        //Since we have no way to pass the channel number to the function.
-        config.addIntegerQuestion("Tap Durations", "0", "Access Control", "Channel 0 Tap Duration (seconds)", channels.tapDurations[0], 0, 86400, tapdur0, true);
-        if(channels.count > 1){
-            config.addIntegerQuestion("Tap Durations", "1", "Access Control", "Channel 1 Tap Duration (seconds)", channels.tapDurations[1], 0, 86400, tapdur1, true);
-            if(channels.count > 2){
-                config.addIntegerQuestion("Tap Durations", "2", "Access Control", "Channel 2 Tap Duration (seconds)", channels.tapDurations[2], 0, 86400, tapdur2, true);
-                if(channels.count > 3){
-                    config.addIntegerQuestion("Tap Durations", "3", "Access Control", "Channel 3 Tap Duration (seconds)", channels.tapDurations[3], 0, 86400, tapdur3, true);
-                    #if CORE_MAX_CHANNELS > 4
-                        #error "TOO MANY CHANNELS!"
-                    #endif
+        durAvailable = false;
+    }
+    //Need to go through and add questions based on number of channels manually
+    //Since we have no way to pass the channel number to the function.
+    config.addIntegerQuestion("Tap Durations", "0", "Access Control", "Channel 0 Tap Duration (seconds)", channels.tapDurations[0], 0, 86400, tapdur0, true, durAvailable);
+    if(channels.count > 1){
+        config.addIntegerQuestion("Tap Durations", "1", "Access Control", "Channel 1 Tap Duration (seconds)", channels.tapDurations[1], 0, 86400, tapdur1, true, durAvailable);
+        if(channels.count > 2){
+            config.addIntegerQuestion("Tap Durations", "2", "Access Control", "Channel 2 Tap Duration (seconds)", channels.tapDurations[2], 0, 86400, tapdur2, true, durAvailable);
+            if(channels.count > 3){
+                config.addIntegerQuestion("Tap Durations", "3", "Access Control", "Channel 3 Tap Duration (seconds)", channels.tapDurations[3], 0, 86400, tapdur3, true, durAvailable);
+                #if CORE_MAX_CHANNELS > 4
+                    #error "TOO MANY CHANNELS!"
+                #endif
 
-                }
             }
         }
     }
@@ -157,23 +159,23 @@ void startESPConfig(){
     #if CORE_HAS_SCREEN
     config.addIntegerQuestion("Device", "set-makerspace-id", "MakeACS", "Set makerspace ID number for API-fetching hours", makerspaceId, 0, 99, setMakerspaceId, true);
     #endif
-    config.addStringQuestion("API", "set-server", "MakeACS", "Set Server URL ('https://make.rit.edu')", networkConfiguration.serverAddress, 64, setServer, true);
+    config.addStringQuestion("API", "set-server", "MakeACS", "Set Server URL", networkConfiguration.serverAddress, 64, setServer, true);
     config.addStringQuestion("API", "set-key", "MakeACS", "Enter API key from server.", "(Not Displayed)", 256, setAPIKey, true);
     
     //Section 4: Offline List
     #ifndef REDUCED_CONFIG
     //Information
-    config.addInformation("", "offline-count", "Offline List", "Total Count of IDs on Offline List", "TODO");
+    config.addInformation("Total", "offline-count", "Offline List", "Total Count of IDs on Offline List", "TODO");
     config.addInformation("Current ID", "current-id", "Offline List", "Current ID", "Loading...");
     config.addInformation("Current ID", "on-list", "Offline List", "Present on offline list?", "Loading...");
     //Commands
-    config.addStringCommand("", "add-list", "Offline List", "Add ID to list", addToList, 64, "", "", false, true);
-    config.addStringCommand("", "remove-list", "Offline List", "Delete ID from list", deleteFromList, 64, "", "", false, true);
-    config.addButtonCommand("", "purge-list", "Offline List", "Delete Entire Offline List", deleteEntireList, "Are you sure? This cannot be undone!", "", false, true);
+    config.addStringCommand("Edit", "add-list", "Offline List", "Add ID to list", addToList, 64, "", "", false, true);
+    config.addStringCommand("Edit", "remove-list", "Offline List", "Delete ID from list", deleteFromList, 64, "", "", false, true);
+    config.addButtonCommand("Edit", "purge-list", "Offline List", "Delete Entire Offline List", deleteEntireList, "Are you sure? This cannot be undone!", "", false, true);
     //Settings
-    config.addChoiceQuestion("", "enable-offline", "Offline List", "Enable offline list", "Enabled", {"Enabled", "Disabled"}, enableOffline, true, false);
-    config.addIntegerQuestion("", "decay-time", "Offline List", "Set offline list decay time (hours)", 168, 24, 8766, setDecayTime, true, false);
-    config.addChoiceQuestion("", "manager-offline", "Offline List", "Manager/Admins added permanently to offline list", "Disabled", {"Enabled", "Disabled"}, managerOffline, true);
+    config.addChoiceQuestion("Edit", "enable-offline", "Offline List", "Enable offline list", "Enabled", {"Enabled", "Disabled"}, enableOffline, true, false);
+    config.addIntegerQuestion("Edit", "decay-time", "Offline List", "Set offline list decay time (hours)", 168, 24, 8766, setDecayTime, true, false);
+    config.addChoiceQuestion("Edit", "manager-offline", "Offline List", "Manager/Admins added permanently to offline list", "Disabled", {"Enabled", "Disabled"}, managerOffline, true);
     #endif
 
     //Section 5: System
@@ -317,33 +319,38 @@ void testAccess(bool pressed){
 }
 void setChannelCount(String answer){
     //Set the channel count on multi-channel devices.
-    //TODO: Implement! 
-    int newCount = answer.toInt();
+    settings.putString("channels.count", answer);
+    if(settings.getString("channels.count") == answer){
+        //Answer accepted!
+        config.updateQuestion("Multi-Channel", "set-channels", answer, "[good]Set new channel count! Restart to apply.");
+    } else{
+        config.updateQuestion("Multi-Channel", "set-channels", answer, "[bad]Unable to set channel count?");
+    }
 }
 void setInputMode(String answer){
     //Set the input mode
     String newMode = "error";
-    if(answer.equalsIgnoreCase("tap")){
+    if(answer.equalsIgnoreCase("TEMP_PRESENT")){
         //Tap mode
         newMode = "TEMP_PRESENT";
     }
-    if(answer.equalsIgnoreCase("insert")){
+    if(answer.equalsIgnoreCase("INSERT")){
         //Insert mode
         newMode = "INSERT";
     }
     if(!newMode.equalsIgnoreCase("error")){
         //Set the new value
-        settings.putString("access.input", answer);
+        settings.putString("access.input", newMode);
         if(newMode == settings.getString("access.input")){
             //Success!
-            config.updateQuestion("", "input-mode", newMode, "[good] Updated input mode! Restart to apply changes.");
+            config.updateQuestion("Core", "input-mode", newMode, "[good] Updated input mode! Restart to apply changes.");
         } else{
             //Failure?
-            config.updateQuestion("", "input-mode", answer, "[bad] Failed to save setting?");
+            config.updateQuestion("Core", "input-mode", answer, "[bad] Failed to save setting?");
         }
     } else{
         //We got a bad input?
-        config.updateQuestion("", "input-mode", answer, "[bad] Got an invalid input?");
+        config.updateQuestion("Core", "input-mode", answer, "[bad] Got an invalid input?");
     }
 }
 void setStationName(String answer){
@@ -387,10 +394,10 @@ void setFaultResp(String answer){
     settings.putString("access.intResp", answer);
     if(settings.getString("access.intResp") == answer){
         //Success!
-        config.updateQuestion("", "set-interrupt-mode", answer, "[good] Updated interrupt response mode! Restart to apply changes.");
+        config.updateQuestion("Core", "set-interrupt-mode", answer, "[good] Updated interrupt response mode! Restart to apply changes.");
     } else{
         //Failure?
-        config.updateQuestion("", "set-interrupt-mode", answer, "[bad] Failed to save setting?");
+        config.updateQuestion("Core", "set-interrupt-mode", answer, "[bad] Failed to save setting?");
     }
 }
 void setMakerspaceId(String answer){

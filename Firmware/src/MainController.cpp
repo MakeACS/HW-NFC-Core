@@ -1098,6 +1098,9 @@ void loop() {
             welcomeMode = flagObj["welcoming"].as<bool>();
             if(welcomeMode){
             Serial.println(F("serverAddress flag set to enter welcoming mode."));
+            #ifndef REDUCED_CONFIG
+            config.updateInformation("General", "mode", "Welcome Reader (Tap)");
+            #endif
             } else{
               Serial.println(F("serverAddress flag unset for welcoming mode. Entering state 'UNKNOWN'"));
               welcomeMode = false;
@@ -1107,6 +1110,9 @@ void loop() {
               }
               //We should ask what state we should be in
               mqttState.requestInfo = true;
+              #ifndef REDUCED_CONFIG
+              config.updateInformation("General", "mode", defaultInputMode);
+              #endif
             }
           }
         }
@@ -1168,8 +1174,14 @@ void loop() {
             welcomeMode = flagObj["welcoming"].as<bool>();
             if(welcomeMode){
             Serial.println(F("serverAddress flag set to enter welcoming mode."));
+            #ifndef REDUCED_CONFIG
+            config.updateInformation("General", "mode", "Welcome Reader (Tap)");
+            #endif
             } else{
               Serial.println(F("serverAddress flag unset for welcoming mode. Entering state 'UNKNOWN'"));
+              #ifndef REDUCED_CONFIG
+              config.updateInformation("General", "mode", defaultInputMode);
+              #endif
               for(int i = 0; i < channels.count; i++){
                 channels.states[i] = "UNKNOWN";
                 channels.changeReasons[i] = "SERVER_COMMANDED";

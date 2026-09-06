@@ -183,6 +183,11 @@ void runMachineStateLoop(void *pvParameters){
         currentUserUid = detectedUid;
         //Does the user exist in offline lists?
         user.inOfflineList = checkOfflineList(currentUserUid);
+        #ifndef REDUCED_CONFIG
+        //Update the config frontend
+        config.updateInformation("General", "current-card", currentUserUid);
+        config.updateInformation("Current ID", "current-id", currentUserUid);
+        #endif
 
         //What do we do with the card?
 
@@ -254,6 +259,7 @@ void runMachineStateLoop(void *pvParameters){
           #ifndef REDUCED_CONFIG
           //Update the config frontend
           config.updateInformation("General", "current-card", currentUserUid);
+          config.updateInformation("Current ID", "current-id", currentUserUid);
           #endif
         } else{
           //We have a card present, but we cannot read it. This is likely a bad card or a bad read. 
@@ -314,7 +320,8 @@ void runMachineStateLoop(void *pvParameters){
         accessDenied = 0;
         #ifndef REDUCED_CONFIG
         //Update the config frontend
-        config.updateInformation("General", "current-card", currentUserUid);
+        config.updateInformation("General", "current-card", "Welcome...");
+        config.updateInformation("Current ID", "current-id", "Welcome...");
         #endif
       }
     } else{ //INSERT
@@ -333,6 +340,7 @@ void runMachineStateLoop(void *pvParameters){
         #ifndef REDUCED_CONFIG
         //Update the config frontend
         config.updateInformation("General", "current-card", "Waiting...");
+        config.updateInformation("Current ID", "current-id", "Waiting...");
         #endif
         for(int i = 0; i < channels.count; i++){
           if(channels.states[i] == "UNLOCKED"){

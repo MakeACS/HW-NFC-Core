@@ -1065,6 +1065,7 @@ void loop() {
         #ifndef REDUCED_CONFIG
         //Update the frontend with the new info;
         config.updateInformation("Device", "makerspace", hmiMakerspace);
+        config.updateInformation("Device", "name", hmiDeviceName);
         for(int i = 0; i <= channels.count; i++){
           String source = "Channel " + String(i);
           config.updateInformation(source, "channel-equipment", hmiMachineNames[i]);

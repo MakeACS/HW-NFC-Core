@@ -3,13 +3,13 @@
 #include <Arduino.h>
 #include <map>
 
-// Declare the map as extern so other files know it exists,
-// but we wait to actually create it in the .cpp file.
 extern std::map<String, uint32_t> offlineAccessList;
 
-// Core functions
-void updateOfflineList(String id, uint32_t currentTimestamp);
+// Default parameter for validDays must be in the header declaration
+void updateOfflineList(String id, uint32_t currentTimestamp, uint32_t validDays = 30);
 bool checkOfflineList(String id);
+bool removeOfflineUser(String id);
+size_t getOfflineListSize();
 void cleanupOfflineList(uint32_t currentTimestamp);
 
 // SPIFFS functions

@@ -2,6 +2,7 @@
 
 #include "Globals.h"
 #include "helperFunctions.h"
+#include "OfflineList.h"
 
 void startESPConfig();
 
@@ -165,17 +166,17 @@ void startESPConfig(){
     //Section 4: Offline List
     #ifndef REDUCED_CONFIG
     //Information
-    config.addInformation("Total", "offline-count", "Offline List", "Total Count of IDs on Offline List", "TODO");
-    config.addInformation("Current ID", "current-id", "Offline List", "Current ID", "Loading...");
-    config.addInformation("Current ID", "on-list", "Offline List", "Present on offline list?", "Loading...");
+    config.addInformation("Total", "offline-count", "Offline List", "Total Count of IDs on Offline List", "Loading...");
+    config.addInformation("Current ID", "current-id", "Offline List", "Current ID", "Waitiing...");
+    config.addInformation("Current ID", "on-list", "Offline List", "Present on offline list?", "Waiting...");
     //Commands
     config.addStringCommand("Edit", "add-list", "Offline List", "Add ID to list", addToList, 64, "", "", false, true);
     config.addStringCommand("Edit", "remove-list", "Offline List", "Delete ID from list", deleteFromList, 64, "", "", false, true);
-    config.addButtonCommand("Edit", "purge-list", "Offline List", "Delete Entire Offline List", deleteEntireList, "Are you sure? This cannot be undone!", "", false, true);
+    config.addButtonCommand("Edit", "purge-list", "Offline List", "Delete Entire Offline List", deleteEntireList, "Are you sure? This cannot be undone!", "", false, true, true); //Disabled for now TODO
     //Settings
-    config.addChoiceQuestion("Edit", "enable-offline", "Offline List", "Enable offline list", "Enabled", {"Enabled", "Disabled"}, enableOffline, true, false);
-    config.addIntegerQuestion("Edit", "decay-time", "Offline List", "Set offline list decay time (hours)", 168, 24, 8766, setDecayTime, true, false);
-    config.addChoiceQuestion("Edit", "manager-offline", "Offline List", "Manager/Admins added permanently to offline list", "Disabled", {"Enabled", "Disabled"}, managerOffline, true);
+    config.addChoiceQuestion("Edit", "enable-offline", "Offline List", "Enable offline list", "Enabled", {"Enabled", "Disabled"}, enableOffline, true, false); //Disabled for now TODO
+    config.addIntegerQuestion("Edit", "decay-time", "Offline List", "Set offline list decay time (hours)", 168, 24, 8766, setDecayTime, true, true); //Disabled for now TODO
+    config.addChoiceQuestion("Edit", "manager-offline", "Offline List", "Manager/Admins added permanently to offline list", "Disabled", {"Enabled", "Disabled"}, managerOffline, true, true); //Disabled for now TODO
     #endif
 
     //Section 5: System
@@ -435,14 +436,50 @@ void setAPIKey(String answer){
 }
 void addToList(String answer){
     //Add this user to the offline list
+    if(answer.length() < 2) return;
+    if(checkOfflineList(answer)){
+        config.updateCommand("Edit", "add-list", "ID was already on offline list.");
+        return;
+    }
+    updateOfflineList(answer, rtc.getEpoch());
+    if(checkOfflineList(answer)){
+        config.updateCommand("Edit", "add-list", "[good]ID added to offline list.");
+        config.updateInformation("Total", "offline-count", String(getOfflineListSize()));
+    } else{
+        config.updateCommand("Edit", "add-list", "[bad]Failed to add ID to list?");
+    }
 
 }
 void deleteFromList(String answer){
     //Delete this user from the offline list
-
+    if(answer.length() < 2) return;
+    if(!checkOfflineList(answer)){
+        config.updateCommand("Edit", "remove-list", "ID was not on offline list.");
+        return;
+    }
+    removeOfflineUser(answer);
+    if(!checkOfflineList(answer)){
+        config.updateCommand("Edit", "remove-list", "[good]ID was removed from list.");
+        config.updateInformation("Total", "offline-count", String(getOfflineListSize()));
+    } else{
+        config.updateCommand("Edit", "remove-list", "[bad]Unable to remove ID from list?");
+    }
 }
 void deleteEntireList(bool pressed){
     //Delete the entire offline list
+    if(!pressed) return;
+    if(getOfflineListSize() == 0){
+        config.updateCommand("Edit", "purge-list", "List is already empty!");
+        return;
+    }
+    deleteListFromSPIFFS();
+    if(getOfflineListSize() == 0){
+        config.updateCommand("Edit", "purge-list", "[good]Cleared offline list!");
+        config.updateInformation("Total", "offline-count", String(getOfflineListSize()));
+        loadListFromSPIFFS();
+    } else{
+        config.updateCommand("Edit", "purge-list", "[bad]Unable to delete list?");
+    }
 
 }
 void enableOffline(String answer){

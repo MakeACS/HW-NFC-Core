@@ -24,6 +24,7 @@ More info: https://github.com/MakeACS/HW-NFC-Core
 #include "OfflineList.h"
 #include "config.h"
 #include "helperFunctions.h"
+#include "OfflineList.h"
 
 namespace {
 TaggedSerial<decltype(::Serial)> mainSerial(::Serial, "[main] ");
@@ -265,7 +266,7 @@ void setup() {
   sendStartupstatusMessage("Starting Tasks...");
 
   xTaskCreate(runAudioVisualController, "runAudioVisualController", 2048, NULL, 5, NULL);
-  xTaskCreate(watchRestartButton, "watchRestartButton", 2048, NULL, 5, NULL);
+  xTaskCreate(watchRestartButton, "watchRestartButton", 4096, NULL, 5, NULL);
 
   //Start i2C
 #if CORE_HAS_ACCELEROMETER
@@ -293,6 +294,7 @@ void setup() {
       rootCertificate += (char)file.read();
     }
   }
+  file.close();
 
   //Load settings from memory
   settings.begin("settings", false);
@@ -684,6 +686,9 @@ void setup() {
   //Get the offline list from SPIFFS
   loadListFromSPIFFS();
   Serial.println(F("Loaded offline list from memory."));
+  #ifndef REDUCED_CONFIG
+  config.updateInformation("Total", "offline-count", String(getOfflineListSize()));
+  #endif
 
   //Initialize a precise timer for the Hobbs Timer
   Serial.println(F("Starting Critical Timer for Hobbs Time..."));
@@ -980,6 +985,10 @@ void loop() {
                   //Add the user to the offline list:
                   updateOfflineList(currentUserUid, rtc.getEpoch());
                   Serial.println(F("User added to offline list."));
+                  #ifndef REDUCED_CONFIG
+                  config.updateInformation("Current ID", "on-list", "Just added!");
+                  config.updateInformation("Total", "offline-count", String(getOfflineListSize()));
+                  #endif
                 }
                 channels.states[ch] = "UNLOCKED";
                 channels.changeReasons[ch] = "AUTHED"; 

@@ -463,8 +463,11 @@ void watchRestartButton(void *pvParameters){
       settings.end();
       //Before we restart, let's save our offline list to memory.
       saveListToSPIFFS();
-
+      Serial.flush();
       delay(50);
+      Serial.println(F("Restarting now..."));
+      delay(100);
+      Serial.flush();
       ESP.restart();
     }
   }

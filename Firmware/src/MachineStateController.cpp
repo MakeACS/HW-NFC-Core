@@ -187,6 +187,11 @@ void runMachineStateLoop(void *pvParameters){
         //Update the config frontend
         config.updateInformation("General", "current-card", currentUserUid);
         config.updateInformation("Current ID", "current-id", currentUserUid);
+        String userOnList = "False";
+        if(user.inOfflineList){
+           userOnList = "True";
+        }
+        config.updateInformation("Current ID", "on-list", userOnList);
         #endif
 
         //What do we do with the card?
@@ -256,6 +261,11 @@ void runMachineStateLoop(void *pvParameters){
           currentUserUid = detectedUid;
           cardRead = true;
           user.inOfflineList = checkOfflineList(currentUserUid);
+          String userOnList = "False";
+          if(user.inOfflineList){
+            userOnList = "True";
+          }
+          config.updateInformation("Current ID", "on-list", userOnList);
           #ifndef REDUCED_CONFIG
           //Update the config frontend
           config.updateInformation("General", "current-card", currentUserUid);
@@ -320,8 +330,9 @@ void runMachineStateLoop(void *pvParameters){
         accessDenied = 0;
         #ifndef REDUCED_CONFIG
         //Update the config frontend
-        config.updateInformation("General", "current-card", "Welcome...");
-        config.updateInformation("Current ID", "current-id", "Welcome...");
+        config.updateInformation("General", "current-card", "Waiting...");
+        config.updateInformation("Current ID", "current-id", "Waiting...");
+        config.updateInformation("Current ID", "on-list", "Waiting...");
         #endif
       }
     } else{ //INSERT
@@ -341,6 +352,7 @@ void runMachineStateLoop(void *pvParameters){
         //Update the config frontend
         config.updateInformation("General", "current-card", "Waiting...");
         config.updateInformation("Current ID", "current-id", "Waiting...");
+        config.updateInformation("Current ID", "on-list", "Waiting...");
         #endif
         for(int i = 0; i < channels.count; i++){
           if(channels.states[i] == "UNLOCKED"){

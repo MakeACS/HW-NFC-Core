@@ -183,6 +183,9 @@ void startESPConfig(){
     //Hardware Information
     config.addInformation("Hardware", "version", "System", "Hardware Version", NICE_HARDWARE_NAME);
     config.addInformation("Hardware", "serial", "System", "Serial Number", serialNumber);
+    #ifdef REDUCED_CONFIG
+    config.addInformation("Hardware", "warn", "System", "Warning", "[bad]This device is running a reduced configuration interface. Most settings will be unavailable!");
+    #endif
     //Firmware Information
     #ifndef REDUCED_CONFIG
     config.addInformation("Firmware", "version", "System", "Firmware Version", FIRMWARE_VERSION);

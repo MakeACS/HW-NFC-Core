@@ -454,6 +454,7 @@ void watchRestartButton(void *pvParameters){
       frontend.println("L 0,0,255");
     #endif
       settings.putString("system.reset", systemState.resetReason);
+      delay(10);
       //Tell the frontend, if connected;
     #if CORE_HAS_SCREEN
       Serial0.println("{\"command\":\"restart\"}");

@@ -400,12 +400,12 @@ void setup() {
   MakerspaceNumber = settings.getInt("makerspace.num");
 
   //Get the reset reason;
-  if(!settings.isKey("system.reset")){
-    //We don't know why we reset?
-
-  } else{
+  if(settings.isKey("system.reset")){
+    //We reset for some known reason
     systemState.resetReason = settings.getString("system.reset");
     settings.remove("system.reset"); //So we know we read it.
+  } else{
+    systemState.resetReason = "Unknown";
   }
 
   networkConfiguration.serverAddress = settings.getString("net.server");
@@ -511,27 +511,33 @@ void setup() {
 
     // --- OTA LOGIC STARTS HERE ---
     // We only verify and check for updates if we are actually online.
-    sendStartupstatusMessage("Checking for OTA...");
-    Serial.println(F("Checking for OTA..."));
 
-    // 1. Configure all OTA settings first
-    ota.EnableSerialDebug();
-    //We use the same cert on our server as Github does.
-    ota.SetCACert(rootCertificate.c_str());
-    ota.SetCallback(handleOtaProgress);
-    String targetFilename = "firmware_" + String(PIOENV_NAME) + ".bin";
-    Serial.print(F("OTA Target Filename: "));
-    Serial.println(targetFilename);
-    ota.SetTargetFilename(targetFilename.c_str());
+    if(settings.getBool("ota.enable", true)){
+      sendStartupstatusMessage("Checking for OTA...");
+      Serial.println(F("Checking for OTA..."));
 
-    // 2. Verify the current firmware can reach the JSON (or rollback)
-    const char* jsonUrl = "https://raw.githubusercontent.com/MakeACS/HW-NFC-Core/main/Firmware/OTADirectory.json";
-    otaVerified = ota.VerifyOrRevert(jsonUrl, FIRMWARE_VERSION);
+      // 1. Configure all OTA settings first
+      ota.EnableSerialDebug();
+      //We use the same cert on our server as Github does.
+      ota.SetCACert(rootCertificate.c_str());
+      ota.SetCallback(handleOtaProgress);
+      String targetFilename = "firmware_" + String(PIOENV_NAME) + ".bin";
+      Serial.print(F("OTA Target Filename: "));
+      Serial.println(targetFilename);
+      ota.SetTargetFilename(targetFilename.c_str());
 
-    // 3. Check for a new update before we continue;
-      int otaresp = ota.CheckForOTAUpdate(jsonUrl, FIRMWARE_VERSION);
+      // 2. Verify the current firmware can reach the JSON (or rollback)
+      String jsonUrl = settings.getString("ota.url", "https://raw.githubusercontent.com/MakeACS/HW-NFC-Core/main/Firmware/OTADirectory.json");
+      otaVerified = ota.VerifyOrRevert(jsonUrl.c_str(), FIRMWARE_VERSION);
+
+      // 3. Check for a new update before we continue;
+      int otaresp = ota.CheckForOTAUpdate(jsonUrl.c_str(), FIRMWARE_VERSION);
       Serial.print(F("OTA Response: "));
       Serial.println(getOtaErrorText(otaresp));
+
+      #ifndef REDUCED_CONFIG
+      config.updateInformation("Firmware", "last-ota", getOtaErrorText(otaresp));
+      #endif
 
       if(otaresp == ESP32OTAPull::SKIPPED_BAD_VERSION){
         //Important one; this is a failed OTA that was reverted. We should report it.
@@ -550,7 +556,17 @@ void setup() {
         mqttState.messageToSend = true;
         mqttState.statusMessage = revertMessage;
         Serial.println(revertMessage);
+        #ifndef REDUCED_CONFIG
+        config.updateInformation("Firmware", "last-ota", revertMessage);
+        #endif
       }
+    } else{
+      Serial.println(F("OTA skipped because it is disabled."));
+      #ifndef REDUCED_CONFIG
+      config.updateInformation("Firmware", "last-ota", "[bad]OTA is disabled!");
+      #endif
+    }
+
 
     // --- OTA LOGIC ENDS HERE ---
 
@@ -564,11 +580,13 @@ void setup() {
   // then we are ready for normal operation.
 
   //Before we continue, let's figure out why we restarted.
+  systemState.resetReason = "Unknown";
   Serial.println(F("Checking reset reason..."));
   if(otaVerified){
     //We should report to the server that we updated.
     mqttState.messageToSend = true;
     mqttState.statusMessage = "OTA Update Successful: " + String(PIOENV_NAME) + " v" + FIRMWARE_VERSION;
+    systemState.resetReason = "OTA Update Successful: " + String(PIOENV_NAME) + " v" + FIRMWARE_VERSION;
     Serial.println(F("Reset Reason: OTA Update Successful."));
   } else{
     //We restart for something other than an OTA
@@ -581,6 +599,7 @@ void setup() {
       ResetDoc["reset-reason"] = reason;
       ResetDoc["report"] = "Watchdog Reset. Source Unknown?";
       Serial.println(F("Reset Reason: Watchdog Reset. Source Unknown?"));
+      systemState.resetReason = "Watchdog Reset, Source Unknown?";
     }
     else if(reason == ESP_RST_BROWNOUT || reason == ESP_RST_PWR_GLITCH){
       //Power-related reset
@@ -591,6 +610,7 @@ void setup() {
       mqttState.messageToSend = true;
       mqttState.statusMessage = "Device restarted due to power anomaly. Check wiring and ensure properly-sized power supply is used.";
       Serial.println(F("Reset Reason: Power Issue Reset."));
+      systemState.resetReason = "Power-Related Reset. Possible brownout?";
     }
     else if(reason == ESP_RST_CPU_LOCKUP || reason == ESP_RST_PANIC){
       //CPU lockup or panic reset
@@ -606,9 +626,11 @@ void setup() {
       if (crasherr != ESP_OK) {
         Serial.println(F("Failed to get core dump summary?"));
         ResetDoc["report"] = "CPU Lockup or Panic Reset, with no core dump summary available.";
+        systemState.resetReason = "CPU Lockup or Panic Reset, with no core dump summary available.";
         Serial.println(F("Failed to get core dump summary?"));
       } else{
         ResetDoc["report"] = "CPU Lockup or Panic Reset, core dump summary attached.";
+        systemState.resetReason = "CPU Lockup or Panic Reset, core dump summary extracted.";
         Serial.println(F("Core dump summary retrieved successfully. Sending to server..."));
         JsonObject dumpDoc = ResetDoc["core-dump-summary"].to<JsonObject>();
         //Task ID
@@ -655,6 +677,10 @@ void setup() {
       mqttState.logMessage = resetPayload;
     }
   }
+  #ifndef REDUCED_CONFIG
+  //Update the reset reason on the config frontend
+  config.updateInformation("Uptime", "reason", systemState.resetReason);
+  #endif
 
   sendStartupstatusMessage("Connecting MQTT...");
 
@@ -1222,15 +1248,15 @@ void loop() {
         if(incoming["action"] == "RESTART"){
           Serial.println(F("serverAddress commanded restart!"));
           Serial.flush();
-          systemState.resetReason = "serverAddress Ordered";
+          systemState.resetReason = "Server Ordered";
           systemState.requestReset = true;
         }
         if((incoming["action"] == "SEAL") && sealBroken){
-          Serial.println(F("serverAddress commanded bus integrity re-seal."));
+          Serial.println(F("Server commanded bus integrity re-seal."));
           reSealBus = true;
         }
         if(incoming["action"] == "IDENTIFY"){
-          Serial.println(F("serverAddress commanded identify."));
+          Serial.println(F("Server commanded identify."));
           identifyRequested = !identifyRequested;
           if(!identifyRequested){
             //Play a single beep to end the identify command.

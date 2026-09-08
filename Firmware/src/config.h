@@ -3,6 +3,7 @@
 #include "Globals.h"
 #include "helperFunctions.h"
 #include "OfflineList.h"
+#include "ESP32OTAPullSecure.h"
 
 void startESPConfig();
 
@@ -33,7 +34,6 @@ void deleteEntireList(bool pressed);
 void enableOffline(String answer);
 void setDecayTime(String answer);
 void managerOffline(String answer);
-void checkForOta(bool pressed);
 void forceRetryOTA(bool pressed);
 void restartDevice(bool pressed);
 void setRestartIdle(bool pressed);
@@ -186,10 +186,10 @@ void startESPConfig(){
     //Firmware Information
     #ifndef REDUCED_CONFIG
     config.addInformation("Firmware", "version", "System", "Firmware Version", FIRMWARE_VERSION);
-    config.addInformation("Firmware", "source", "System", "Firmware Source", "https://github.com/MakeACS/HW-NFC-Core");
-    config.addInformation("Firmware", "last-ota", "System", "Last OTA Result", "TODO", "The result the last time the system checked for an OTA.");
-    config.addInformation("Firmware", "secure-boot", "System", "Secure Boot", "[bad]DISABLED", "Secure boot ensures only valid firmware is run on the device.");
-    config.addInformation("Firmware", "secure-boot-key", "System", "Secure Boot Key", "N/A", "Hash of the Secure Boot keey the system checks on firmware");
+    config.addInformation("Firmware", "source", "System", "Firmware Source", WEBSITE);
+    config.addInformation("Firmware", "last-ota", "System", "Last OTA Result", "Loading...", "The result the last time the system checked for an OTA.");
+    config.addInformation("Firmware", "secure-boot", "System", "Secure Boot", "[bad]DISABLED", "Secure boot ensures only valid firmware is run on the device."); //TODO Implement
+    config.addInformation("Firmware", "secure-boot-key", "System", "Secure Boot Key", "N/A", "Hash of the Secure Boot keey the system checks on firmware"); //TODO implement
     #endif
     //Network Information
     config.addInformation("Network", "wifi-mac", "System", "WiFi MAC Address", getBaseMacAddress());
@@ -198,17 +198,19 @@ void startESPConfig(){
     #endif
     //Uptime Information
     #ifndef REDUCED_CONFIG
-    config.addInformation("Uptime", "uptime", "System", "Uptime (seconds)", String(millis64() / 1000));
+    config.addInformation("Uptime", "uptime", "System", "Uptime", "00:00:00");
     config.addInformation("Uptime", "reason", "System", "Last Restart Reason", systemState.resetReason, "What triggered the device to restart last.");
     //Time Information
-    config.addInformation("Time", "time", "System", "Current System Time", rtc.getDateTime(true));
-    config.addInformation("Time", "timezone", "System", "Timezone (hours)", settings.getString("system.timezone"));
+    config.addInformation("Time", "time", "System", "Current System Time", "Loading...");
+    String timezoneInfo = "Not set (default -4)";
+    if(settings.isKey("system.timezone")){
+        timezoneInfo = settings.getString("system.timezone"); 
+    }
+    config.addInformation("Time", "timezone", "System", "Timezone (hours)", timezoneInfo);
     //OTA Commands
-    config.addButtonCommand("OTA", "check", "System", "Check for OTA", checkForOta, "This may take up to 10 seconds.");
-    //TODO: Should be available only if we skipped a bad OTA
-    config.addButtonCommand("OTA", "retry", "System", "Force Retry Reverted OTA", forceRetryOTA, "This will restart the device and attempt to install the OTA.", "", true, true, true); 
+    config.addButtonCommand("OTA", "retry", "System", "Force Retry Reverted OTA", forceRetryOTA, "This will tell the device to retry a reverted/skipped OTA.", "", true, true); 
     //Restart Commands
-    config.addButtonCommand("Restart", "restart", "System", "Restart Device", restartDevice, "Are you sure? This will immediately restart the device.", "", true);
+    config.addButtonCommand("Restart", "restart", "System", "Restart Device Immediatley", restartDevice, "Are you sure? This will immediately restart the device.", "", true);
     config.addLatchCommand("Restart", "restart-idle", "System", "Restart Next Time Not In Use", setRestartIdle, "If the device is currently not in use, it will restart immediately!", "");
     #endif
     //Password Commands
@@ -222,9 +224,10 @@ void startESPConfig(){
     config.addChoiceQuestion("OTA", "enable", "System", "Enable Automatic OTA at Startup?", "Enabled", {"Enabled", "Disabled"}, enableOTA, true);
     config.addStringQuestion("OTA", "url", "System", "Set OTA JSON URL", "https://github.com/MakeACS/HW-NFC-Core/blob/main/Firmware/OTADirectory.json", 128, setOTAURL, true);
     //Time
-    config.addIntegerQuestion("Time", "timezone-set", "System", "Set Timezone (Hours +/- UTC)", settings.getString("system.timezone").toInt(), -12, 12, setTimezone, true);
+    config.addIntegerQuestion("Time", "timezone-set", "System", "Set Timezone (Hours +/- UTC)", settings.getString("system.timezone", "-4").toInt(), -12, 12, setTimezone, true);
     #endif
 }
+
 
 #ifndef REDUCED_CONFIG
 void updateConfig(){
@@ -240,6 +243,21 @@ void updateConfig(){
         String source = "Channel " + String(i);
         float hobbsHours = channels.hobbsSeconds[i] / 3600;
         config.updateInformation(source, "channel-hobbs", String(hobbsHours));
+    }
+    //Uptime:
+    String uptimeString = "Unknown";
+    unsigned long totalSeconds = millis64() / 1000;
+    unsigned long hours = totalSeconds / 3600;
+    unsigned long minutes = (totalSeconds / 60) % 60;
+    unsigned long seconds = totalSeconds % 60;
+    char buffer[12]; // Buffer size accommodates up to 999 hours cleanly
+    snprintf(buffer, sizeof(buffer), "%02lu:%02lu:%02lu", hours, minutes, seconds);
+    uptimeString = String(buffer);
+    config.updateInformation("Uptime", "uptime", uptimeString);
+    //System Time:
+    if(rtc.getYear() >= 2024){
+        //Valid date info, so show it.
+        config.updateInformation("Time", "time", rtc.getDateTime(true));
     }
 }
 #endif
@@ -493,11 +511,23 @@ void setDecayTime(String answer){
 void managerOffline(String answer){
     //Enable/disable managers and admins never being removed from the list. 
 }
-void checkForOta(bool pressed){
-    //Check for an OTA, and report if there is anything new.
-}
 void forceRetryOTA(bool pressed){
     //Force retry an invalid OTA
+    if(!pressed) return;
+    settings.end();
+    //Open the OTA settings:
+    delay(10);
+    settings.begin("ota_prefs", true);
+    String badVer = settings.getString("bad_ver", "");
+    if(badVer.length() > 2){
+        settings.remove("bad_ver");
+        config.updateCommand("OTA", "retry", "On next boot, system will attempt to install " + badVer + " again.");
+    } else{
+        config.updateCommand("OTA", "retry", "Could not find an OTA version marked bad.");
+    }
+    settings.end();
+    //Re-open the main settings folder;
+    settings.begin("settings", false);
 }
 void restartDevice(bool pressed){
     //Immediately restart the device
@@ -534,7 +564,7 @@ void setNewHint(String answer){
     } else{
         message = "[bad]ERROR: Unable to set new hint?";
     }
-    config.updateCommand("Password", "new-password", message);
+    config.updateCommand("Password", "new-hint", message);
 }
 void factoryReset1(bool pressed){
     //button 1 of 2 to do a factory reset
@@ -556,11 +586,38 @@ void factoryReset2(bool pressed){
 }
 void enableOTA(String answer){
     //"Enabled" "Disabled" OTA on boot
+    if(answer.equalsIgnoreCase("enabled")){
+        //Enable OTA
+        settings.putBool("ota.enable", true);
+        config.updateQuestion("OTA", "enable", "[good]OTA enabled.");
+        return;
+    } else{
+        //Disable OTA
+        settings.putBool("ota.enable", false);
+        config.updateQuestion("OTA", "enable", "OTA disabled.");
+        return;
+    }
+    config.updateQuestion("OTA", "enable", "[bad]Unknown error.");
 }
 void setOTAURL(String answer){
     //Set a new OTA URL
+    if(answer.length() > 15){
+        settings.putString("ota.url", answer);
+        if(settings.getString("ota.url") == answer){
+            config.updateQuestion("OTA", "url", "[good]Set new OTA URL.");
+            return;
+        }
+        config.updateQuestion("OTA", "url", "[bad]That seems too short to be a URL. Try again.");
+    }
+    config.updateQuestion("OTA", "url", "[bad]Unknown error?");
 }
 void setTimezone(String answer){
     //Set a new timezone (-12 to 12)
-
+    settings.putString("system.timezone", answer);
+    if(settings.getString("system.timezone") == answer){
+        String affirm = "[good]Timezone set to UTC" + answer;
+        config.updateQuestion("Time", "timezone-set", affirm);
+    } else{
+        config.updateQuestion("Time", "timezeone-set", "[bad]Error updating.");
+    }
 }

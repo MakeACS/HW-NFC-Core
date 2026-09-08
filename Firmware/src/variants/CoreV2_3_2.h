@@ -1,6 +1,7 @@
 #pragma once
 
 #define NICE_HARDWARE_NAME "2.3.2-LE"
+#define WEBSITE "https://github.com/MakeACS/HW-NFC-Core"
 
 #define HARDWARE_VERSION "2.3.2"
 #define USE_INTERNAL_USB_CDC 0
@@ -12,6 +13,8 @@
 #define CORE_HAS_LOCAL_CHANNEL_OUTPUTS 0
 #define CORE_NFC_READER_PN532 1
 #define CORE_MAX_CHANNELS 1
+
+#define REDUCED_CONFIG 1 //Needed to keep enough memory clear for TLS
 
 #define PIN_NFC_POWER 8
 #define PIN_NFC_CS 6

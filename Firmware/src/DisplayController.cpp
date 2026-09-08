@@ -160,10 +160,12 @@ void runScreenController(void *pvParameters){
     //Every 10 minutes, fetch the latest announcements and hours;
     if (checkAnnouncements <= millis64() && networkState.unavailable == false) {
       Serial.println(F("Refreshing announcements and hours from server..."));
+      checkAnnouncements = millis64() + 600000;
       if(refreshAnnouncements() && refreshHours()){
         sendDisplaychannelState(true, true);
         NextScreenUpdate = millis64() + 1000;
-        checkAnnouncements = millis64() + 600000;
+      } else{
+        Serial.println("Failed to update announcements/hours!");
       }
     }
 

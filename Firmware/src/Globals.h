@@ -56,6 +56,7 @@
 #include <stdio.h>
 #include <esp_crc.h>
 #include "ESP32OTAPullSecure.h"
+#include "ESPConfig.h"
 
 #include "Device.h"
 
@@ -132,9 +133,18 @@ struct UserInfo {
 	bool inOfflineList = false;
 };
 
+struct KeepAlivePing {
+	uint64_t gapTime = 2000;
+	uint64_t nextTime = 0;
+	uint64_t lastPingTime = 0;
+	bool missedPing = false;
+	bool pingPending = false;
+};
+
 // Forward declarations shared across translation units.
 String readNfcCardId();
 bool anyChannelMatcheschannelState(String targetState);
+String disconnectReasonToString(uint8_t reason);
 
 void sendDisplaychannelState(bool sendRarely = false, bool sendFrequently = true);
 int readScreenRotation();
@@ -162,6 +172,7 @@ String calculateSha256(String input);
 void IRAM_ATTR updateHobbsCounter(void* arg);
 
 // Shared objects.
+extern ESPConfig config;
 extern Preferences settings;
 extern JsonDocument ConfigJson;
 extern ESP32OTAPull ota;
@@ -185,7 +196,6 @@ extern bool frontendButtonPressed;
 extern bool frontendCardDetect1;
 extern bool frontendCardDetect2;
 #endif
-
 extern String rootCertificate;
 extern bool gamerMode;
 extern SystemState systemState;
@@ -205,6 +215,10 @@ extern bool lockWhenIdle;
 extern bool restartWhenUnused;
 extern bool welcomeMode;
 extern NetworkState networkState;
+extern volatile uint8_t lastDisconnectReason;
+extern String lastDisconnectReasonVerbose;
+extern unsigned long long lastReconnectTime;
+extern KeepAlivePing keepAlivePing;
 extern String tapUid;
 extern bool userWelcomed;
 extern String serialNumber;

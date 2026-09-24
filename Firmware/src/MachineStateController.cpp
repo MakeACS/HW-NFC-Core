@@ -425,12 +425,25 @@ void runMachineStateLoop(void *pvParameters){
   #if CORE_HAS_LOCAL_CHANNEL_OUTPUTS
   if(channels.count > 1){
     //We only need to set the GPIOs if we have more than 1 channel, otherwise we just use PIN_ACCESS for all channels.
-    for(int i = 0; i < channels.count; i++){
-      if(channels.access[i]){
-        digitalWrite(PIN_GPIO_1 + i, HIGH);
-      } else{
-        digitalWrite(PIN_GPIO_1 + i, LOW);
-      }
+    if(channels.access[0] == 1){
+      digitalWrite(PIN_GPIO_1, HIGH);
+    } else {
+      digitalWrite(PIN_GPIO_1, LOW);
+    }
+    if(channels.access[1] == 1){
+      digitalWrite(PIN_GPIO_2, HIGH);
+    } else {
+      digitalWrite(PIN_GPIO_2, LOW);
+    }
+    if(channels.access[2] == 1){
+      digitalWrite(PIN_GPIO_3, HIGH);
+    } else {
+      digitalWrite(PIN_GPIO_3, LOW);
+    }
+    if(channels.access[3] == 1){
+      digitalWrite(PIN_GPIO_4, HIGH);
+    } else {
+      digitalWrite(PIN_GPIO_4, LOW);
     }
   }
   #endif

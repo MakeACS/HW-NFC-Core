@@ -12,10 +12,23 @@ TaggedSerial<decltype(::Serial)> machineStateSerial(::Serial, "[state] ");
 void handleOfflineAuth();
 
 void runMachineStateLoop(void *pvParameters){
+  unsigned long long networkUnavailableSince = 0;
   Serial.println(F("runMachineStateLoop Started."));
   while(1){
     delay(50);
 
+    if(networkState.unavailable){
+      if(networkUnavailableSince == 0){
+        networkUnavailableSince = millis64();
+      } else if(millis64() - networkUnavailableSince >= 120000 &&
+                !anyChannelMatcheschannelState("UNLOCKED") &&
+                !anyChannelMatcheschannelState("ALWAYS_ON")){
+        systemState.resetReason = "Network unavailable for more than 2 minutes";
+        systemState.requestReset = true;
+      }
+    } else{
+      networkUnavailableSince = 0;
+    }
 
     //Temp disable, false positives
     /*

@@ -26,16 +26,33 @@ JsonDocument announcementsDocument;
 JsonDocument hoursDocument;
 unsigned long todayClosingEpoch = 0;
 String messageOfTheDay;
+const char* dayNames[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 }
 
 void sendDisplaychannelState(bool sendRarely, bool sendFrequently);
 int readScreenRotation();
 bool refreshAnnouncements();
 bool refreshHours();
+int weekdayFromDateString(const String &dateStr);
 void calculateClosingEpochForToday();
 void updateClosingMessageOfTheDay();
 uint64_t millis64();
 void sendStartupstatusMessage(String statusMessage);
+
+// Derives the day-of-week (0=Sunday..6=Saturday) from an ISO date string's actual date,
+// rather than trusting the order entries happen to arrive in from the API.
+int weekdayFromDateString(const String &dateStr) {
+  if (dateStr.length() < 10) {
+    return -1;
+  }
+  struct tm dateTm = {};
+  dateTm.tm_year = dateStr.substring(0, 4).toInt() - 1900;
+  dateTm.tm_mon  = dateStr.substring(5, 7).toInt() - 1;
+  dateTm.tm_mday = dateStr.substring(8, 10).toInt();
+  dateTm.tm_hour = 12;  // Avoid rollover edge cases when normalizing
+  mktime(&dateTm);      // Normalizes the struct and fills in tm_wday
+  return dateTm.tm_wday;
+}
 
 void sendDisplaychannelState(bool sendRarely, bool sendFrequently){
   //Sends the common regular information the screen needs
@@ -356,19 +373,16 @@ bool refreshHours() {
         hoursDocument.clear();
 
         JsonArray hoursData = tempDoc["obj"];
-        
-        // --- UPDATED LOGIC: STATIC DAY NAMES ---
-        const char* dayNames[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
-        
-        // Loop through the JSON array and add the day name based purely on its index
+
+        // Label each entry using its own "day" date, since the API doesn't guarantee
+        // entries arrive already sorted Sunday-first.
         for (int i = 0; i < hoursData.size(); i++) {
           JsonObject dayObj = hoursData[i];
-          
-          if (i < 7) { // Safety check to prevent out-of-bounds
-            dayObj["dayName"] = dayNames[i]; 
+          int wday = weekdayFromDateString(dayObj["day"].as<String>());
+          if (wday >= 0) {
+            dayObj["dayName"] = dayNames[wday];
           }
         }
-        // ---------------------------------------
 
         hoursDocument["list"] = hoursData;
         
@@ -404,11 +418,18 @@ void calculateClosingEpochForToday() {
   // 2. Get today's day of the week (0 = Sunday, 1 = Monday, ..., 6 = Saturday)
   int todayWday = timeinfo->tm_wday;   
 
-  // 3. Grab today's hours using the weekday index!
-  JsonObject todayHours = hoursDocument["list"][todayWday];
-  
-  // If the shop is closed today, reset and abort
-  if (todayHours["closed"].as<bool>()) {
+  // 3. Find today's hours by matching dayName, not by array position, since entries
+  // aren't guaranteed to be ordered Sunday-first.
+  JsonObject todayHours;
+  for (JsonObject dayObj : hoursDocument["list"].as<JsonArray>()) {
+    if (strcmp(dayObj["dayName"] | "", dayNames[todayWday]) == 0) {
+      todayHours = dayObj;
+      break;
+    }
+  }
+
+  // If no matching day was found (or shop closed today), reset and abort
+  if (todayHours.isNull() || todayHours["closed"].as<bool>()) {
     todayClosingEpoch = 0;
     return;
   }

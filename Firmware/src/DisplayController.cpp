@@ -39,19 +39,35 @@ void updateClosingMessageOfTheDay();
 uint64_t millis64();
 void sendStartupstatusMessage(String statusMessage);
 
-// Derives the day-of-week (0=Sunday..6=Saturday) from an ISO date string's actual date,
-// rather than trusting the order entries happen to arrive in from the API.
+// Derives the day-of-week (0=Sunday..6=Saturday) from an ISO-8601 UTC date-time string
+// ("YYYY-MM-DDTHH:MM:SS...Z"), converted to *local* time via rtc.offset - the same
+// convention rtc.getEpoch() uses - so evening UTC/local date rollovers don't shift the day.
 int weekdayFromDateString(const String &dateStr) {
-  if (dateStr.length() < 10) {
+  if (dateStr.length() < 19) {
     return -1;
   }
-  struct tm dateTm = {};
-  dateTm.tm_year = dateStr.substring(0, 4).toInt() - 1900;
-  dateTm.tm_mon  = dateStr.substring(5, 7).toInt() - 1;
-  dateTm.tm_mday = dateStr.substring(8, 10).toInt();
-  dateTm.tm_hour = 12;  // Avoid rollover edge cases when normalizing
-  mktime(&dateTm);      // Normalizes the struct and fills in tm_wday
-  return dateTm.tm_wday;
+  int year   = dateStr.substring(0, 4).toInt();
+  int month  = dateStr.substring(5, 7).toInt();
+  int day    = dateStr.substring(8, 10).toInt();
+  int hour   = dateStr.substring(11, 13).toInt();
+  int minute = dateStr.substring(14, 16).toInt();
+  int second = dateStr.substring(17, 19).toInt();
+
+  // Days since 1970-01-01 for the given UTC calendar date (Hinnant's civil_from_days algorithm)
+  int y = year - (month <= 2 ? 1 : 0);
+  long era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  long daysSinceEpoch = era * 146097 + (long)doe - 719468;
+
+  long utcEpoch = daysSinceEpoch * 86400L + hour * 3600L + minute * 60L + second;
+  long localEpoch = utcEpoch + rtc.offset;
+
+  long localDay = localEpoch / 86400L;
+  int wday = (int)((localDay + 4) % 7);  // epoch day 0 (1970-01-01) was a Thursday
+  if (wday < 0) wday += 7;
+  return wday;
 }
 
 void sendDisplaychannelState(bool sendRarely, bool sendFrequently){

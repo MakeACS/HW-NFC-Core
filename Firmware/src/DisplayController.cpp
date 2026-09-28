@@ -374,18 +374,33 @@ bool refreshHours() {
 
         JsonArray hoursData = tempDoc["obj"];
 
-        // Label each entry using its own "day" date, since the API doesn't guarantee
-        // entries arrive already sorted Sunday-first.
+        // Slot each entry by its actual "day" date rather than the order the API sent
+        // it in - the screen firmware indexes this array positionally (0=Sunday..6=Saturday).
+        JsonObject slots[7];
         for (int i = 0; i < hoursData.size(); i++) {
           JsonObject dayObj = hoursData[i];
           int wday = weekdayFromDateString(dayObj["day"].as<String>());
-          if (wday >= 0) {
-            dayObj["dayName"] = dayNames[wday];
+          if (wday < 0 || wday > 6) {
+            continue;
+          }
+          dayObj["dayName"] = dayNames[wday];
+          slots[wday] = dayObj;
+        }
+
+        JsonArray orderedHours = hoursDocument["list"].to<JsonArray>();
+        for (int wday = 0; wday < 7; wday++) {
+          if (!slots[wday].isNull()) {
+            orderedHours.add(slots[wday]);
+          } else {
+            // No data for this weekday; keep the slot filled so positions stay aligned.
+            JsonObject placeholder = orderedHours.add<JsonObject>();
+            placeholder["dayName"] = dayNames[wday];
+            placeholder["closed"] = true;
+            placeholder["open"] = "";
+            placeholder["close"] = "";
           }
         }
 
-        hoursDocument["list"] = hoursData;
-        
         // Update the MOTD closing epoch
         calculateClosingEpochForToday(); 
 

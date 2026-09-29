@@ -766,8 +766,7 @@ void loop() {
   //Send the reset reason on boot once we have nothing else pending;
   if(RTSjustStarted && !mqttState.logToSend){
     RTSjustStarted = false;
-    mqttState.logMessage = systemState.resetReason;
-    mqttState.logType = "reset-reason";
+    mqttState.logMessage = "reset-reason: " + systemState.resetReason;
     mqttState.logToSend = true;
   }
 

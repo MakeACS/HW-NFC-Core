@@ -337,45 +337,47 @@ bool refreshAnnouncements() {
 bool refreshHours() {
   bool HoursUpdated = false;
   if (!networkState.unavailable) {
-    networkclient.setCACert(rootCertificate.c_str());
+    // Plain (non-TLS) client: this data isn't sensitive, and reusing the shared
+    // TLS networkclient back-to-back with refreshAnnouncements() was crashing the device.
+    WiFiClient httpClient;
     Serial.println("Connecting to server for hours...");
 
-    if (networkclient.connect(networkConfiguration.serverAddress.c_str(), 443)) {
+    if (httpClient.connect(networkConfiguration.serverAddress.c_str(), 80)) {
       Serial.println("Connected!");
 
       // Construct the URL path using your variable
       String path = "/api/hours/" + String(MakerspaceNumber);
 
       // --- 1. SEND THE HTTP GET REQUEST MANUALLY ---
-      networkclient.print("GET ");
-      networkclient.print(path);
-      networkclient.println(" HTTP/1.1");
+      httpClient.print("GET ");
+      httpClient.print(path);
+      httpClient.println(" HTTP/1.1");
 
-      networkclient.print("Host: ");
-      networkclient.println(networkConfiguration.serverAddress);
+      httpClient.print("Host: ");
+      httpClient.println(networkConfiguration.serverAddress);
 
       // Tell the server to close the connection after responding
-      networkclient.println("Connection: close");
+      httpClient.println("Connection: close");
 
       // Send a blank line (\r\n) to indicate the end of the HTTP headers
-      networkclient.println();
+      httpClient.println();
 
       // --- 2. READ THE HTTP RESPONSE ---
       // Wait for the server to reply
-      while (networkclient.connected() && !networkclient.available()) {
+      while (httpClient.connected() && !httpClient.available()) {
         delay(10);
       }
 
       // Read headers line by line until we find the empty line
-      while (networkclient.connected()) {
-        String line = networkclient.readStringUntil('\n');
+      while (httpClient.connected()) {
+        String line = httpClient.readStringUntil('\n');
         if (line == "\r") {
           break;  // Empty line found, headers are done
         }
       }
 
       // --- 3. PARSE THE JSON BODY ---
-      String responseBody = networkclient.readString();
+      String responseBody = httpClient.readString();
 
       // Create a temporary document for parsing the raw response
       JsonDocument tempDoc;
@@ -425,7 +427,7 @@ bool refreshHours() {
       }
 
       // Clean up the connection
-      networkclient.stop();
+      httpClient.stop();
 
     } else {
       Serial.println("Connection to server failed for hours.");

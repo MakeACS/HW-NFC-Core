@@ -142,8 +142,8 @@ config.updateInformation("Network", "state", "[time]: Attempting to reconnect...
   //network watchdog (in MachineStateController.cpp) will request a device restart once
   //it is safe to do so (i.e. no channel is actively unlocked/always-on).
   uint64_t networkDownDuration = millis64() - connectAttemptStart;
-  if(!radioResetDone && networkDownDuration > 60000ULL && networkState.transport == NetworkState::Transport::WiFi){ //60 seconds of continuous failure
-    Serial.println(F("Network has been down for 60+ seconds. Power-cycling WiFi radio..."));
+  if(!radioResetDone && networkDownDuration > 15000ULL && networkState.transport == NetworkState::Transport::WiFi){ //15 seconds of continuous failure
+    Serial.println(F("Network has been down for 15+ seconds. Power-cycling WiFi radio..."));
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     delay(500);
@@ -153,13 +153,9 @@ config.updateInformation("Network", "state", "[time]: Attempting to reconnect...
     Serial.println(F("WiFi radio cycled."));
     if(!mqttState.logToSend){
       //Notify the server we had to restart the radio
+      //We can prep this to send right away, since it will be sent as soon as the connection is established.
       mqttState.logMessage = "WiFi issues fixed by cycling radio.";
       mqttState.logToSend = true;
-    }
-    //Temporarily send a message to the history as well for debug purposes:
-    if(!mqttState.messageToSend){
-      mqttState.statusMessage = "WiFi issues fixed by cycling radio.";
-      mqttState.messageToSend = true;
     }
   }
 

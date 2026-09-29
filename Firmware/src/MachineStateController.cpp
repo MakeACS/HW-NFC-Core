@@ -20,10 +20,10 @@ void runMachineStateLoop(void *pvParameters){
     if(networkState.unavailable){
       if(networkUnavailableSince == 0){
         networkUnavailableSince = millis64();
-      } else if(millis64() - networkUnavailableSince >= 120000 &&
+      } else if(millis64() - networkUnavailableSince >= 60000 &&
                 !anyChannelMatcheschannelState("UNLOCKED") &&
                 !anyChannelMatcheschannelState("ALWAYS_ON")){
-        systemState.resetReason = "Network unavailable for more than 2 minutes";
+        systemState.resetReason = "Network unavailable for more than 60 seconds";
         systemState.requestReset = true;
       }
     } else{

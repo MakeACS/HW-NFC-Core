@@ -335,6 +335,8 @@ bool refreshAnnouncements() {
 }
 
 bool refreshHours() {
+  //Temp disable
+  return true;
   bool HoursUpdated = false;
   if (!networkState.unavailable) {
     // Plain (non-TLS) client: this data isn't sensitive, and reusing the shared

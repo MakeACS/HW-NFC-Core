@@ -29,6 +29,7 @@ void runAudioVisualController(void *pvParameters){
   byte DonePlaying = 0;
   byte MelodyStep = 0;
   bool tonePlaying = false;
+  bool firstSingleBeepSkipped = false;
   uint64_t MelodyTime = 0;
   Serial.println(F("runAudioVisualController Started."));
   while(1){
@@ -290,7 +291,13 @@ void runAudioVisualController(void *pvParameters){
     } else if(LightState == "FAULT" || faultBeepRequested){
       Melody = 3;
     } else if(singleBeep){
-      Melody = 4;
+      if(!firstSingleBeepSkipped){
+        //Ignore the very first singleBeep request after boot.
+        firstSingleBeepSkipped = true;
+        singleBeep = 0;
+      } else{
+        Melody = 4;
+      }
     } else if(identifyRequested){
       //Play a constant tone to identify the device
       Melody = 5;

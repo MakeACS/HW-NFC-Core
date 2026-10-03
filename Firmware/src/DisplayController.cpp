@@ -26,16 +26,49 @@ JsonDocument announcementsDocument;
 JsonDocument hoursDocument;
 unsigned long todayClosingEpoch = 0;
 String messageOfTheDay;
+const char* dayNames[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 }
 
 void sendDisplaychannelState(bool sendRarely, bool sendFrequently);
 int readScreenRotation();
 bool refreshAnnouncements();
 bool refreshHours();
+int weekdayFromDateString(const String &dateStr);
 void calculateClosingEpochForToday();
 void updateClosingMessageOfTheDay();
 uint64_t millis64();
 void sendStartupstatusMessage(String statusMessage);
+
+// Derives the day-of-week (0=Sunday..6=Saturday) from an ISO-8601 UTC date-time string
+// ("YYYY-MM-DDTHH:MM:SS...Z"), converted to *local* time via rtc.offset - the same
+// convention rtc.getEpoch() uses - so evening UTC/local date rollovers don't shift the day.
+int weekdayFromDateString(const String &dateStr) {
+  if (dateStr.length() < 19) {
+    return -1;
+  }
+  int year   = dateStr.substring(0, 4).toInt();
+  int month  = dateStr.substring(5, 7).toInt();
+  int day    = dateStr.substring(8, 10).toInt();
+  int hour   = dateStr.substring(11, 13).toInt();
+  int minute = dateStr.substring(14, 16).toInt();
+  int second = dateStr.substring(17, 19).toInt();
+
+  // Days since 1970-01-01 for the given UTC calendar date (Hinnant's civil_from_days algorithm)
+  int y = year - (month <= 2 ? 1 : 0);
+  long era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  long daysSinceEpoch = era * 146097 + (long)doe - 719468;
+
+  long utcEpoch = daysSinceEpoch * 86400L + hour * 3600L + minute * 60L + second;
+  long localEpoch = utcEpoch + rtc.offset;
+
+  long localDay = localEpoch / 86400L;
+  int wday = (int)((localDay + 4) % 7);  // epoch day 0 (1970-01-01) was a Thursday
+  if (wday < 0) wday += 7;
+  return wday;
+}
 
 void sendDisplaychannelState(bool sendRarely, bool sendFrequently){
   //Sends the common regular information the screen needs
@@ -302,47 +335,51 @@ bool refreshAnnouncements() {
 }
 
 bool refreshHours() {
+  //Temp disable
+  return true;
   bool HoursUpdated = false;
   if (!networkState.unavailable) {
-    networkclient.setCACert(rootCertificate.c_str());
+    // Plain (non-TLS) client: this data isn't sensitive, and reusing the shared
+    // TLS networkclient back-to-back with refreshAnnouncements() was crashing the device.
+    WiFiClient httpClient;
     Serial.println("Connecting to server for hours...");
 
-    if (networkclient.connect(networkConfiguration.serverAddress.c_str(), 443)) {
+    if (httpClient.connect(networkConfiguration.serverAddress.c_str(), 80)) {
       Serial.println("Connected!");
 
       // Construct the URL path using your variable
       String path = "/api/hours/" + String(MakerspaceNumber);
 
       // --- 1. SEND THE HTTP GET REQUEST MANUALLY ---
-      networkclient.print("GET ");
-      networkclient.print(path);
-      networkclient.println(" HTTP/1.1");
+      httpClient.print("GET ");
+      httpClient.print(path);
+      httpClient.println(" HTTP/1.1");
 
-      networkclient.print("Host: ");
-      networkclient.println(networkConfiguration.serverAddress);
+      httpClient.print("Host: ");
+      httpClient.println(networkConfiguration.serverAddress);
 
       // Tell the server to close the connection after responding
-      networkclient.println("Connection: close");
+      httpClient.println("Connection: close");
 
       // Send a blank line (\r\n) to indicate the end of the HTTP headers
-      networkclient.println();
+      httpClient.println();
 
       // --- 2. READ THE HTTP RESPONSE ---
       // Wait for the server to reply
-      while (networkclient.connected() && !networkclient.available()) {
+      while (httpClient.connected() && !httpClient.available()) {
         delay(10);
       }
 
       // Read headers line by line until we find the empty line
-      while (networkclient.connected()) {
-        String line = networkclient.readStringUntil('\n');
+      while (httpClient.connected()) {
+        String line = httpClient.readStringUntil('\n');
         if (line == "\r") {
           break;  // Empty line found, headers are done
         }
       }
 
       // --- 3. PARSE THE JSON BODY ---
-      String responseBody = networkclient.readString();
+      String responseBody = httpClient.readString();
 
       // Create a temporary document for parsing the raw response
       JsonDocument tempDoc;
@@ -356,22 +393,34 @@ bool refreshHours() {
         hoursDocument.clear();
 
         JsonArray hoursData = tempDoc["obj"];
-        
-        // --- UPDATED LOGIC: STATIC DAY NAMES ---
-        const char* dayNames[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
-        
-        // Loop through the JSON array and add the day name based purely on its index
+
+        // Slot each entry by its actual "day" date rather than the order the API sent
+        // it in - the screen firmware indexes this array positionally (0=Sunday..6=Saturday).
+        JsonObject slots[7];
         for (int i = 0; i < hoursData.size(); i++) {
           JsonObject dayObj = hoursData[i];
-          
-          if (i < 7) { // Safety check to prevent out-of-bounds
-            dayObj["dayName"] = dayNames[i]; 
+          int wday = weekdayFromDateString(dayObj["day"].as<String>());
+          if (wday < 0 || wday > 6) {
+            continue;
+          }
+          dayObj["dayName"] = dayNames[wday];
+          slots[wday] = dayObj;
+        }
+
+        JsonArray orderedHours = hoursDocument["list"].to<JsonArray>();
+        for (int wday = 0; wday < 7; wday++) {
+          if (!slots[wday].isNull()) {
+            orderedHours.add(slots[wday]);
+          } else {
+            // No data for this weekday; keep the slot filled so positions stay aligned.
+            JsonObject placeholder = orderedHours.add<JsonObject>();
+            placeholder["dayName"] = dayNames[wday];
+            placeholder["closed"] = true;
+            placeholder["open"] = "";
+            placeholder["close"] = "";
           }
         }
-        // ---------------------------------------
 
-        hoursDocument["list"] = hoursData;
-        
         // Update the MOTD closing epoch
         calculateClosingEpochForToday(); 
 
@@ -380,7 +429,7 @@ bool refreshHours() {
       }
 
       // Clean up the connection
-      networkclient.stop();
+      httpClient.stop();
 
     } else {
       Serial.println("Connection to server failed for hours.");
@@ -404,11 +453,18 @@ void calculateClosingEpochForToday() {
   // 2. Get today's day of the week (0 = Sunday, 1 = Monday, ..., 6 = Saturday)
   int todayWday = timeinfo->tm_wday;   
 
-  // 3. Grab today's hours using the weekday index!
-  JsonObject todayHours = hoursDocument["list"][todayWday];
-  
-  // If the shop is closed today, reset and abort
-  if (todayHours["closed"].as<bool>()) {
+  // 3. Find today's hours by matching dayName, not by array position, since entries
+  // aren't guaranteed to be ordered Sunday-first.
+  JsonObject todayHours;
+  for (JsonObject dayObj : hoursDocument["list"].as<JsonArray>()) {
+    if (strcmp(dayObj["dayName"] | "", dayNames[todayWday]) == 0) {
+      todayHours = dayObj;
+      break;
+    }
+  }
+
+  // If no matching day was found (or shop closed today), reset and abort
+  if (todayHours.isNull() || todayHours["closed"].as<bool>()) {
     todayClosingEpoch = 0;
     return;
   }

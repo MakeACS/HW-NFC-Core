@@ -127,12 +127,37 @@ uint64_t millis64(){
 
 void connectNetwork(){
   byte TLSRetryCount = 0; //Tracks how many failed TLS attempts we had in a row.
+  uint64_t connectAttemptStart = millis64(); //Tracks how long we've been struggling to reconnect.
+  bool radioResetDone = false; //Tracks whether we've already power-cycled the WiFi radio this outage.
   retryNetwork:
 
 #ifndef REDUCED_CONFIG
 //Tell the config frontend we are disconnected.
 config.updateInformation("Network", "state", "[time]: Attempting to reconnect...");
 #endif
+
+  //If we've been failing to reconnect for a long time, the WiFi/TLS stack may be wedged
+  //in a state that a simple reconnect can't fix (a known ESP32 issue). Escalate to a full
+  //radio power-cycle. If the outage continues beyond that, runMachineStateLoop's own
+  //network watchdog (in MachineStateController.cpp) will request a device restart once
+  //it is safe to do so (i.e. no channel is actively unlocked/always-on).
+  uint64_t networkDownDuration = millis64() - connectAttemptStart;
+  if(!radioResetDone && networkDownDuration > 15000ULL && networkState.transport == NetworkState::Transport::WiFi){ //15 seconds of continuous failure
+    Serial.println(F("Network has been down for 15+ seconds. Power-cycling WiFi radio..."));
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(500);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(networkConfiguration.wifiSsid, networkConfiguration.wifiPassword);
+    radioResetDone = true;
+    Serial.println(F("WiFi radio cycled."));
+    if(!mqttState.logToSend){
+      //Notify the server we had to restart the radio
+      //We can prep this to send right away, since it will be sent as soon as the connection is established.
+      mqttState.logMessage = "WiFi issues fixed by cycling radio.";
+      mqttState.logToSend = true;
+    }
+  }
 
   //First, figure out if we should be using ethernet or wifi
 
@@ -681,8 +706,12 @@ void resetKeepAliveTimer(){
 bool getTLSCert(){
   //Gets new TLS certs from the server.
   networkclient.setInsecure();
-  networkclient.connect(networkConfiguration.serverAddress.c_str(), 443);
-  
+  if(!networkclient.connect(networkConfiguration.serverAddress.c_str(), 443)){
+    Serial.println(F("!!! Could not open connection to fetch TLS cert! !!!"));
+    networkclient.stop();
+    return false;
+  }
+
   networkclient.print("GET /api/rootCA HTTP/1.1\r\n");
   networkclient.print("Host: ");
   networkclient.print(networkConfiguration.serverAddress.c_str());
@@ -697,7 +726,13 @@ bool getTLSCert(){
   // End of headers boundary
   networkclient.print("\r\n");
 
+  unsigned long headerTimeout = millis();
   while (networkclient.connected()) {
+    if (millis() - headerTimeout > 5000) { // 5 second timeout
+      Serial.println("!!! Client Timeout awaiting headers! !!!");
+      networkclient.stop();
+      return false;
+    }
     String line = networkclient.readStringUntil('\n');
     if (line == "\r") {
       Serial.println("Headers received, body:");
@@ -711,13 +746,7 @@ bool getTLSCert(){
       networkclient.stop();
       return false;
     }
-    delay(10); 
-    networkState.unavailable = true;
-    return false;
-  }
-
-  if(networkState.unavailable == true){
-    return false;
+    delay(10);
   }
 
   // The body is a JSON, let's capture it in a string.

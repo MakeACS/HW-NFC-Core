@@ -186,6 +186,8 @@ String stationName;
 
 KeepAlivePing keepAlivePing;
 
+bool RTSjustStarted = true; //Tracks if we just started, to send reset reason on boot.
+
 void setup() {
   // put your setup code here, to run once:
 
@@ -574,7 +576,6 @@ void setup() {
   // then we are ready for normal operation.
 
   //Before we continue, let's figure out why we restarted.
-  systemState.resetReason = "Unknown";
   Serial.println(F("Checking reset reason..."));
   if(otaVerified){
     //We should report to the server that we updated.
@@ -740,6 +741,13 @@ void loop() {
     updateConfig();
   }
   #endif
+
+  //Send the reset reason on boot once we have nothing else pending;
+  if(RTSjustStarted && !mqttState.logToSend){
+    RTSjustStarted = false;
+    mqttState.logMessage = "reset-reason: " + systemState.resetReason;
+    mqttState.logToSend = true;
+  }
 
   //Ping-related checks;
   if(keepAlivePing.nextTime <= millis64()){

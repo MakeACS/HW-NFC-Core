@@ -470,25 +470,6 @@ void publishMqttstatusMessage(String Topic, String Payload){
   mqtt.publish(Topic, Payload, false, 2); //Send not retained at QoS 2
 }
 
-// Implement the HAL functions on an Arduino compatible system.
-void mfrc630_SPI_transfer(const uint8_t* tx, uint8_t* rx, uint16_t len) {
-  for (uint16_t i=0; i < len; i++){
-    rx[i] = SPI.transfer(tx[i]);
-  }
-}
-
-// Select the chip and start an SPI transaction.
-void mfrc630_SPI_select() {
-  SPI.beginTransaction(SPISettings(2000000, MSBFIRST, SPI_MODE0));  // gain control of SPI bus
-  digitalWrite(PIN_NFC_CS, LOW);
-}
-
-// Unselect the chip and end the transaction.
-void mfrc630_SPI_unselect() {
-  digitalWrite(PIN_NFC_CS, HIGH);
-  SPI.endTransaction();    // release the SPI bus
-}
-
 void migrateLegacySettings() {
   struct LegacySetting {
     const char* currentKey;

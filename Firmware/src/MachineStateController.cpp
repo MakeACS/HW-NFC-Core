@@ -1,5 +1,6 @@
 #include "Globals.h"
 #include "MachineStateController.h"
+#include "CardReader.h"
 #include "TaggedSerial.h"
 #include "OfflineList.h"
 
@@ -14,8 +15,8 @@ void handleOfflineAuth();
 void runMachineStateLoop(void *pvParameters){
   Serial.println(F("runMachineStateLoop Started."));
   while(1){
-    delay(50);
-
+    //Wake early on card events, otherwise run on the usual 50ms cadence.
+    const EventBits_t cardEventBits = xEventGroupWaitBits(cardEvents, CARD_EVENT_INSERTED | CARD_EVENT_REMOVED, pdTRUE, pdFALSE, pdMS_TO_TICKS(50));
 
     //Temp disable, false positives
     /*
@@ -151,7 +152,7 @@ void runMachineStateLoop(void *pvParameters){
 
     }
     //Some random cleanup, none of these should be set if there isn't a card present
-    if(!cardPresent){
+    if(!card.present){
       mqttState.welcomingPending = false;
       accessDenied = false;
       pendingApproval = false;
@@ -170,23 +171,40 @@ void runMachineStateLoop(void *pvParameters){
       //If we are in INSERT mode, we look at the switches before determining if we are looking for a card.
       //If we are in TEMP_PRESENT mode, we look for a card no matter what.
 
-    if(inputMode == "TEMP_PRESENT"){
-      //We always scan for a card in TEMP_PRESENT mode
-      detectedUid = readNfcCardId();
-      if(detectedUid == ""){
-        //Double check there really isn't a card present
-        detectedUid = readNfcCardId();
+    //Card events from CardReader. Removal is handled first, so a swapped card is a remove followed by an insert.
+    if(cardEventBits & CARD_EVENT_REMOVED){
+      user.inOfflineList = false;
+      accessDenied = false;
+      #ifndef REDUCED_CONFIG
+      //Update the config frontend
+      config.updateInformation("General", "current-card", "Waiting...");
+      config.updateInformation("Current ID", "current-id", "Waiting...");
+      config.updateInformation("Current ID", "on-list", "Waiting...");
+      #endif
+      if(inputMode == "TEMP_PRESENT"){
+        mqttState.sendWelcome = false;
+        mqttState.welcomingPending = false;
+        userWelcomed = 0;
+      } else{ //INSERT
+        pendingApproval = false;
+        for(int i = 0; i < channels.count; i++){
+          if(channels.states[i] == "UNLOCKED"){
+            channels.states[i] = "IDLE";
+            channels.changeReasons[i] = "CARD_REMOVED";
+          }
+        }
       }
-      if(!cardPresent && detectedUid.length() > 2){
-        //Accept the current card as the actual card.
-        cardPresent = true;
-        currentUserUid = detectedUid;
+    }
+
+    const bool cardInsertedEvent = (cardEventBits & CARD_EVENT_INSERTED) && card.present;
+    if(inputMode == "TEMP_PRESENT"){
+      if(cardInsertedEvent){
         //Does the user exist in offline lists?
-        user.inOfflineList = checkOfflineList(currentUserUid);
+        user.inOfflineList = checkOfflineList(card.UID);
         #ifndef REDUCED_CONFIG
         //Update the config frontend
-        config.updateInformation("General", "current-card", currentUserUid);
-        config.updateInformation("Current ID", "current-id", currentUserUid);
+        config.updateInformation("General", "current-card", card.UID);
+        config.updateInformation("Current ID", "current-id", card.UID);
         String userOnList = "False";
         if(user.inOfflineList){
            userOnList = "True";
@@ -242,25 +260,11 @@ void runMachineStateLoop(void *pvParameters){
         }
       }
     } else{ //INSERT
-    #if CORE_HAS_LOCAL_CHANNEL_OUTPUTS
-      if(!cardPresent && !digitalRead(PIN_DET_1) && !digitalRead(PIN_DET_2)){
-    #else
-      if(!cardPresent && frontendCardDetect1 && frontendCardDetect2){
-    #endif
+      if(cardInsertedEvent){
         //New card inserted!
-        cardPresent = true;
-        bool cardRead = false;
-        //Read the card:
-        detectedUid = readNfcCardId();
-        if(detectedUid == ""){
-          //Double check there really isn't a card present
-          detectedUid = readNfcCardId();
-        }
-        if(detectedUid.length() > 2){
-          //Accept the current card as the actual card.
-          currentUserUid = detectedUid;
-          cardRead = true;
-          user.inOfflineList = checkOfflineList(currentUserUid);
+        const bool cardRead = !card.readFailed;
+        if(cardRead){
+          user.inOfflineList = checkOfflineList(card.UID);
           String userOnList = "False";
           if(user.inOfflineList){
             userOnList = "True";
@@ -268,8 +272,8 @@ void runMachineStateLoop(void *pvParameters){
           config.updateInformation("Current ID", "on-list", userOnList);
           #ifndef REDUCED_CONFIG
           //Update the config frontend
-          config.updateInformation("General", "current-card", currentUserUid);
-          config.updateInformation("Current ID", "current-id", currentUserUid);
+          config.updateInformation("General", "current-card", card.UID);
+          config.updateInformation("Current ID", "current-id", card.UID);
           #endif
         } else{
           //We have a card present, but we cannot read it. This is likely a bad card or a bad read. 
@@ -311,58 +315,6 @@ void runMachineStateLoop(void *pvParameters){
       }
     }
   
-    //Was a card that was present removed?
-
-    //In TEMP_PRESENT mode, we do this based on the card no longer being detected by currentUserUid.
-    if(inputMode == "TEMP_PRESENT"){
-      if(cardPresent && !detectedUid.equalsIgnoreCase(currentUserUid)){
-        //Either found no currentUserUid or currentUserUid we found is different
-        Serial.print(F("Card "));
-        Serial.print(currentUserUid);
-        Serial.print(F(" replaced with "));
-        Serial.println(detectedUid);
-        cardPresent = false;
-        user.inOfflineList = false;
-        currentUserUid = "";
-        mqttState.sendWelcome = false;
-        mqttState.welcomingPending = false;
-        userWelcomed = 0;
-        accessDenied = 0;
-        #ifndef REDUCED_CONFIG
-        //Update the config frontend
-        config.updateInformation("General", "current-card", "Waiting...");
-        config.updateInformation("Current ID", "current-id", "Waiting...");
-        config.updateInformation("Current ID", "on-list", "Waiting...");
-        #endif
-      }
-    } else{ //INSERT
-      //In INSERT mode, we detect this based on switches
-    #if CORE_HAS_LOCAL_CHANNEL_OUTPUTS
-      if(cardPresent && (digitalRead(PIN_DET_1) || digitalRead(PIN_DET_2))){
-    #else
-      if(cardPresent && (!frontendCardDetect1 || !frontendCardDetect2)){
-    #endif
-        //Reset everything to normal.
-        cardPresent = false;
-        currentUserUid = "";
-        pendingApproval = false;
-        accessDenied = false;
-        user.inOfflineList = false;
-        #ifndef REDUCED_CONFIG
-        //Update the config frontend
-        config.updateInformation("General", "current-card", "Waiting...");
-        config.updateInformation("Current ID", "current-id", "Waiting...");
-        config.updateInformation("Current ID", "on-list", "Waiting...");
-        #endif
-        for(int i = 0; i < channels.count; i++){
-          if(channels.states[i] == "UNLOCKED"){
-            channels.states[i] = "IDLE";
-            channels.changeReasons[i] = "CARD_REMOVED";
-          }
-        }
-      }
-    }
-
     //Handle access expiration for channels if in TEMP_PRESENT mode:
     if(inputMode == "TEMP_PRESENT"){
       for(int i = 0; i < channels.count; i++){
@@ -504,90 +456,6 @@ void runMachineStateLoop(void *pvParameters){
         }
       }
     }
-  }
-}
-
-String readNfcCardId(){
-  //Let's first ask the NFC reader for the card (if one is there)
-  
-  String ReturnedID = "";
-  
-#if CORE_NFC_READER_MFRC630
-  uint16_t atqa = mfrc630_iso14443a_REQA();
-
-  if (atqa != 0) {  // Are there any cards that answered?
-    uint8_t sak;
-    uint8_t uid[10] = {0};  // uids are maximum of 10 bytes long.
-
-    // Select the card and discover its uid.
-    uint8_t uid_len = mfrc630_iso14443a_select(uid, &sak);
-    if (uid_len != 0) {  // did we get a currentUserUid?
-      for (uint8_t i=0; i<uid_len; i++){
-      if (uid[i] < 16){
-          ReturnedID += "0"; 
-          ReturnedID += String(uid[i], HEX);
-        } else {
-          ReturnedID += String(uid[i], HEX);;
-        }
-      }
-      ReturnedID.toLowerCase();
-      //Serial.print(F("Found currentUserUid :"));
-      //Serial.println(ReturnedID);
-    } else {
-      Serial.print("Could not determine currentUserUid, perhaps some cards don't play");
-      Serial.print(" well with the other cards? Or too many collisions?\n");
-      ReturnedID = "";
-    }
-  } else{
-    //Did not find a currentUserUid
-    //Serial.println(F("Didn't find a card."));
-    ReturnedID = "";
-  }
-#elif CORE_NFC_READER_PN532
-  //1. Check the reader is working. If not, restart it.
-  byte NFCTryCount = 0;
-  uint32_t versionData = nfc.getFirmwareVersion();
-  while(!versionData && NFCTryCount < 3) {
-    //PN532 not responding, restart it.
-    digitalWrite(PIN_NFC_RST, LOW);
-    delay(10);
-    digitalWrite(PIN_NFC_RST, HIGH);
-    delay(10);
-    nfc.wakeup();
-    nfc.setPassiveActivationRetries(0xFF);
-    delay(10);
-    NFCTryCount++;
-    versionData = nfc.getFirmwareVersion();
-  }
-  if(NFCTryCount >= 3){
-    Serial.println(F("PN532 failed to respond after 3 restart attempts. Cannot read card."));
-    ReturnedID = "";
-    if(!mqttState.messageToSend){
-      //Send a message
-      mqttState.statusMessage = "Possible malfunction of NFC reader, please check the device.";
-      mqttState.messageToSend = true;
-    }
-  } else{
-    //Do a normal card read:
-    uint8_t uid[10] = {0};
-    uint8_t uidLength = 0;
-    if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 100)) {
-      for (uint8_t index = 0; index < uidLength; index++) {
-        if (uid[index] < 16) {
-          ReturnedID += "0";
-        }
-        ReturnedID += String(uid[index], HEX);
-      }
-      ReturnedID.toLowerCase();
-    }
-  }
-#endif //END PN532
-
-  if(ReturnedID.length() > 0){
-    return ReturnedID;
-  } else{
-    //We did not find a card due to errors or no card present.
-    return "";
   }
 }
 

@@ -44,9 +44,9 @@
 #define PIN_SDA 9
 #define PIN_VARIANT 8
 #define PIN_LED 7
-#define PIN_IRQ 6
+#define PIN_NFC_IRQ 6
 #define PIN_IODIR_3 5
-#define PIN_PDWN 4
+#define PIN_NFC_PDWN 4
 #define PIN_SCL 3
 #define PIN_GPIO_4 2
 #define PIN_BUZZER 1

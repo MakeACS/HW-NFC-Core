@@ -34,14 +34,8 @@
 #include "esp_ota_ops.h"
 #include <MQTTPubSubClient.h>
 #include <SPI.h>
-#if CORE_NFC_READER_MFRC630
-#include <mfrc630.h>
-#endif
 #if CORE_HAS_LOCAL_AUDIO_VISUAL
 #include <Adafruit_NeoPixel.h>
-#endif
-#if CORE_NFC_READER_PN532
-#include <Adafruit_PN532.h>
 #endif
 #include "USB.h"
 #include <esp_system.h>
@@ -141,8 +135,6 @@ struct KeepAlivePing {
 	bool pingPending = false;
 };
 
-// Forward declarations shared across translation units.
-String readNfcCardId();
 bool anyChannelMatcheschannelState(String targetState);
 String disconnectReasonToString(uint8_t reason);
 
@@ -163,9 +155,6 @@ String getEthernetMacAddress();
 #endif
 String getActiveNetworkInterface();
 void publishMqttstatusMessage(String topic, String payload);
-void mfrc630_SPI_transfer(const uint8_t* tx, uint8_t* rx, uint16_t len);
-void mfrc630_SPI_select();
-void mfrc630_SPI_unselect();
 String getBaseMacAddress();
 void sendStartupstatusMessage(String message);
 String calculateSha256(String input);
@@ -180,9 +169,6 @@ extern ESP32Time rtc;
 extern WebSocketsClient socket;
 extern MQTTPubSub::PubSubClient<1536> mqtt;
 extern OneWire ds;
-#if CORE_NFC_READER_PN532
-extern Adafruit_PN532 nfc;
-#endif
 #if CORE_HAS_LOCAL_AUDIO_VISUAL
 extern Adafruit_NeoPixel CBI;
 #endif
@@ -200,8 +186,6 @@ extern String rootCertificate;
 extern bool gamerMode;
 extern SystemState systemState;
 extern bool accessEnabled;
-extern String currentUserUid;
-extern String detectedUid;
 extern bool faultBeepRequested;
 extern int MakerspaceNumber;
 extern String hardwareVersion;
@@ -210,7 +194,6 @@ extern String inputMode;
 extern String defaultInputMode;
 extern bool pendingApproval;
 extern bool accessDenied;
-extern bool cardPresent;
 extern bool lockWhenIdle;
 extern bool restartWhenUnused;
 extern bool welcomeMode;
@@ -219,7 +202,6 @@ extern volatile uint8_t lastDisconnectReason;
 extern String lastDisconnectReasonVerbose;
 extern unsigned long long lastReconnectTime;
 extern KeepAlivePing keepAlivePing;
-extern String tapUid;
 extern bool userWelcomed;
 extern String serialNumber;
 extern NetworkConfiguration networkConfiguration;

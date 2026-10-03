@@ -20,6 +20,7 @@ More info: https://github.com/MakeACS/HW-NFC-Core
 #include "DisplayController.h"
 #include "FrontendController.h"
 #include "MachineStateController.h"
+#include "CardReader.h"
 #include "TaggedSerial.h"
 #include "OfflineList.h"
 #include "config.h"
@@ -57,9 +58,6 @@ TaggedSerial<decltype(::Serial)> mainSerial(::Serial, "[main] ");
   #include "esp_ota_ops.h"          //Version 3.1.1 | Inherent to ESP32 Arduino
   #include <MQTTPubSubClient.h> 
   #include <SPI.h>
-#if CORE_NFC_READER_MFRC630
-  #include <mfrc630.h>
-#endif
 #if CORE_HAS_LOCAL_AUDIO_VISUAL
   #include <Adafruit_NeoPixel.h>
 #endif
@@ -89,9 +87,6 @@ ESPConfig config;
   WebSocketsClient socket;
   MQTTPubSub::PubSubClient<1536> mqtt;
   OneWire ds(PIN_ONE_WIRE); 
-#if CORE_NFC_READER_PN532
-  Adafruit_PN532 nfc(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_NFC_CS);
-#endif
 #if CORE_HAS_LOCAL_AUDIO_VISUAL
   Adafruit_NeoPixel CBI(1, PIN_LED, NEO_RGB + NEO_KHZ800);
 #endif
@@ -113,8 +108,6 @@ String rootCertificate; //Stores the root certificate loaded from SPIFFS
 bool gamerMode = 1;  //Set to 0 to disable gamer mode, i.e. cycle RGB. Used during boot.
 SystemState systemState;
 bool accessEnabled = 0; //Used to tell the frontend to enable the access signal to the bus. 
-String currentUserUid; //Stores the currentUserUid of the user currently using the machine.
-String detectedUid = ""; //Stores the last-found currentUserUid
 bool faultBeepRequested = 0; //We use the 3 beep normally for fault to indicate cannot welcome/auth due to no network, to differentiate from welcome/auth denied.
 
 int MakerspaceNumber = 36;  // number from the makerspace's URL. We need to hard-code this for now.
@@ -130,12 +123,10 @@ String inputMode = "INSERT"; //Stores how we ingest cards.
 String defaultInputMode = "INSERT"; //Stores how we should ingest cards, when not in welcome mode.
 bool pendingApproval = 0; //Set to 1 when we have a card present that hasn't been authed yet, this is used for LED animations. 
 bool accessDenied = 0; //Set to 1 when a card is present but has been denied, for LED animations. 
-bool cardPresent = 0; //Used to track if there is a card present in the machine.
 bool lockWhenIdle = 0;
 bool restartWhenUnused = 0;
 bool welcomeMode = 0; //If 1, we are acting as a welcome reader and not a normal reader.
 NetworkState networkState;
-String tapUid; //Stores the currentUserUid between cycles for comparison when in tap mode.
 bool userWelcomed = 0;
 
 //Variables - Config
@@ -437,10 +428,13 @@ void setup() {
   Serial.println(F("Started Tasks."));
   Serial.flush();
 
-  //Start SPI here, in case we want to use Ethernet in the future. 
+  //Start the shared SPI bus here. It is used by the NFC reader and Ethernet (when present), so it is owned by the main controller.
+  //Each device must only access it inside SPI.beginTransaction()/endTransaction(), which holds the bus lock.
   //SCK, MISO, MOSI, SS
-  pinMode(PIN_NFC_CS, OUTPUT);
   SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, -1);
+
+  //Start the NFC reader before anything else uses the bus, so its chip select is parked high.
+  cardReaderInit();
 
 #if CORE_HAS_ETHERNET
   const bool ethernetReady = initializeEthernet();
@@ -690,22 +684,6 @@ void setup() {
   
   //If we cared about why we restarted, this'd be the place to handle it.
 
-  //Start the NFC reader, make sure it is working as expected. 
- #if CORE_NFC_READER_MFRC630
-  mfrc630_AN1102_recommended_registers(MFRC630_PROTO_ISO14443A_106_MILLER_MANCHESTER);
-  mfrc630_write_reg(0x28, 0x8E);
-  mfrc630_write_reg(0x29, 0x15);
-  mfrc630_write_reg(0x2A, 0x11);
-  mfrc630_write_reg(0x2B, 0x06);
-#elif CORE_NFC_READER_PN532
-  pinMode(PIN_NFC_POWER, OUTPUT);
-  pinMode(PIN_NFC_RST, OUTPUT);
-  digitalWrite(PIN_NFC_POWER, HIGH);
-  digitalWrite(PIN_NFC_RST, HIGH);
-  nfc.begin();
-  nfc.SAMConfig();
-#endif
-
   //We should initialize the OneWire bus here, check for the right devices, etc.
   //TODO will enable onewire in future version, needs more testing to be reliable. 
 
@@ -735,6 +713,7 @@ void setup() {
 
   //Time to loop!
   xTaskCreate(runFrontendController, "Frontend", 2048, NULL, 5, NULL);
+  xTaskCreate(runCardReaderLoop, "runCardReaderLoop", 4096, NULL, 5, NULL);
   xTaskCreate(runMachineStateLoop, "runMachineStateLoop", 4096, NULL, 5, NULL);
   gamerMode = 0; //Disable the startup lighting
 
@@ -826,7 +805,7 @@ void loop() {
       //Send an auth request to the server
       mqttState.sendAuth = false;
       outgoing["state"] = "UNLOCKED";
-      outgoing["cardTagID"] = currentUserUid;
+      outgoing["cardTagID"] = card.UID;
       String AuthPayload;
       serializeJson(outgoing, AuthPayload);
       outgoing.clear();
@@ -857,7 +836,7 @@ void loop() {
             channels.reportedStates[i] = channels.states[i];
           }
         }
-        outgoing["currentCardTag"] = currentUserUid;
+        outgoing["currentCardTag"] = card.UID;
         String StateChangePayload;
         serializeJson(outgoing, StateChangePayload);
         outgoing.clear();
@@ -967,7 +946,7 @@ void loop() {
           statusObject["hobbsTime"] = channels.hobbsSeconds[i];
         }
       }
-      outgoing["currentCardTag"] = currentUserUid;
+      outgoing["currentCardTag"] = card.UID;
       String StatusPayload;
       serializeJson(outgoing, StatusPayload);
       outgoing.clear();
@@ -977,7 +956,7 @@ void loop() {
     if(mqttState.sendWelcome){
       //Send a welcome message to the server
       mqttState.sendWelcome = false;
-      outgoing["cardTagID"] = currentUserUid;
+      outgoing["cardTagID"] = card.UID;
       String WelcomePayload;
       serializeJson(outgoing, WelcomePayload);
       outgoing.clear();
@@ -1005,11 +984,11 @@ void loop() {
           if(channels.states[ch] == "IDLE" || (channels.states[ch] == "UNLOCKED" && inputMode == "TEMP_PRESENT")){ //Unlock only if idle, or re-up unlocked channels if in tap-present mode.
             if(IsAuthed){
               Serial.println(F("Access Granted!"));
-              if(AuthID == currentUserUid){
+              if(AuthID == card.UID){
                 Serial.println(F("UIDs match. Unlocking."));
                 if(!user.inOfflineList){
                   //Add the user to the offline list:
-                  updateOfflineList(currentUserUid, rtc.getEpoch());
+                  updateOfflineList(card.UID, rtc.getEpoch());
                   Serial.println(F("User added to offline list."));
                   #ifndef REDUCED_CONFIG
                   config.updateInformation("Current ID", "on-list", "Just added!");
@@ -1026,7 +1005,7 @@ void loop() {
               }
             } else{
               Serial.println(F("accessEnabled Denied!"));
-              if(cardPresent){
+              if(card.present){
                 SendAccessDenied = 1;
               }
             }
@@ -1178,7 +1157,7 @@ void loop() {
           int ch = v["id"] | -1;
           if (ch >= 0 && ch < channels.count) {
             channels.states[ch] = v["state"] | "UNKNOWN";
-            if(channels.states[ch] == "UNLOCKED" && !cardPresent){
+            if(channels.states[ch] == "UNLOCKED" && !card.present){
               channels.states[ch] = "IDLE";
             }
             #ifndef REDUCED_CONFIG
@@ -1281,7 +1260,7 @@ void loop() {
       if(IsWelcomed){
         //User was welcomed into the space properly.
         Serial.println(F("User welcomed!"));
-        if(currentUserUid == WelcomeID){
+        if(card.UID == WelcomeID){
           //The user's card is still here, so beep and light up.
           userWelcomed = 1;
         } else{

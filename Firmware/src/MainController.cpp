@@ -258,7 +258,8 @@ void setup() {
   sendStartupstatusMessage("Starting Tasks...");
 
   startTask(runAudioVisualController, "runAudioVisualController", 2048, NULL);
-  startTask(watchRestartButton, "watchRestartButton", 2560, NULL);
+  startTask(watchRestartButton, "watchRestartButton", 4096, NULL); //Also runs the whole reset sequence (NVS + SPIFFS writes), which needs the stack
+  startTask(runFrontendController, "Frontend", 2048, NULL); //Delivers the reset button state on 2.3.2, so it must run during network trouble too
 
   //Start i2C
 #if CORE_HAS_ACCELEROMETER
@@ -701,7 +702,6 @@ void setup() {
   #endif
 
   //Time to loop!
-  startTask(runFrontendController, "Frontend", 2048, NULL);
   static AccessConfig accessConfig;
   accessConfig.inputMode = inputModeFromApiString(defaultInputMode.c_str());
   accessConfig.interruptResponse = interruptResponseFromApiString(interruptResponse.c_str());

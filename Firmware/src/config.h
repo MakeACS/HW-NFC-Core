@@ -191,7 +191,8 @@ void startESPConfig(){
     //Firmware Information
     config.addInformation("Firmware", "version", "System", "Firmware Version", FIRMWARE_VERSION);
     String betaMode = "";
-    String betaOption = "";    if(ota.isBeta()){
+    String betaOption = "";    
+    if(ota.isBeta()){
         betaMode = "Beta pre-release (if available)";
         betaOption = "Beta";
     } else{
@@ -604,11 +605,11 @@ void setOTAMode(String answer){
     if(answer.equalsIgnoreCase("beta")){
         //Enable beta mode
         ota.SetBetaChannel(true);
-        config.updateQuestion("OTA", "setBeta", "[bad]WARNING: Device will boot to BETA mode on next restart!");
+        config.updateQuestion("OTA", "setBeta", "Beta", "[bad]WARNING: Device will boot to BETA mode on next restart!");
     } else{
         //Disable beta mode
         ota.SetBetaChannel(false);
-        config.updateQuestion("OTA", "setBeta", "Device will use production firmware on next restart.");
+        config.updateQuestion("OTA", "setBeta", "Production (Recommended)", "Device will use production firmware on next restart.");
     }
 }
 void enableOTA(String answer){

@@ -1,6 +1,7 @@
 // Handles code related to the ESP-Config library.
 
 #include "Globals.h"
+#include "AccessManager.h"
 #include "helperFunctions.h"
 #include "OfflineList.h"
 #include "ESP32OTAPullSecure.h"
@@ -61,7 +62,7 @@ void startESPConfig(){
     config.addInformation("Network","state","Network","State","Loading...");
     config.addInformation("Network", "local-ip", "Network", "Local IP", "Loading...");
     config.addInformation("Network","disconnect-reason", "Network", "Disconnect Reason", "Loading...");
-    config.addInformation("Network", "net-interface", "Network", "Interface", "Wi-Fi"); //Hard-coded as wifi for now, until we get ethernet fully online.
+    config.addInformation("Network", "net-interface", "Network", "Interface", "Wi-Fi"); //Static placeholder; active-interface reporting is not wired to this field.
     //Core WiFi Information
     #endif
     config.addInformation("WiFi", "ssid", "Network", "SSID", networkConfiguration.wifiSsid, "The WiFi name we are connected to.");
@@ -98,11 +99,11 @@ void startESPConfig(){
     if(CORE_MAX_CHANNELS > 1){
         config.addInformation("General", "station-name", "Access Control", "Station Name", stationName, "Station name is used to name the deployment when multiple pieces of equipment are attached.");
     }
-    config.addInformation("General", "mode", "Access Control", "Mode", inputMode, "How the Core handles when a card is presented/inserted.");
+    config.addInformation("General", "mode", "Access Control", "Mode", defaultInputMode, "How the Core handles when a card is presented/inserted.");
     config.addInformation("General", "current-card", "Access Control", "Current Card", "Waiting...", "The currently inserted/detected card in/on the Core");
-    config.addInformation("General", "channel-count", "Access Control", "Channel Count", String(channels.count), "How many access control channels the Core controls.");
+    config.addInformation("General", "channel-count", "Access Control", "Channel Count", String(channelSettings.count), "How many access control channels the Core controls.");
     //Repeat Channel Information
-    for(int i = 0; i < channels.count; i++){
+    for(int i = 0; i < channelSettings.count; i++){
         //Iterate through the channels, and make an info section for each
         String source = "Channel " + String(i);
         config.addInformation(source, "channel-equipment", "Access Control", "Equipment Name", "Loading..."); //hmiMachineNames[i]
@@ -116,23 +117,23 @@ void startESPConfig(){
     config.addChoiceQuestion("Core", "input-mode", "Access Control", "Set the input mode (when not in welcome mode)", defaultInputMode, {"TEMP_PRESENT", "INSERT"}, setInputMode, true);
     config.addChoiceQuestion("Core", "set-interrupt-mode", "Access Control", "Set the interrupt response mode", interruptResponse, {"FAULT", "LOCK_TEMP", "IDLE", "MESSAGE"}, setFaultResp, true, false);
     if(CORE_MAX_CHANNELS > 1){
-        config.addIntegerQuestion("Multi-Channel", "set-channels", "Access Control", "Set the number of access control channels", channels.count, 1, CORE_MAX_CHANNELS, setChannelCount, true);
+        config.addIntegerQuestion("Multi-Channel", "set-channels", "Access Control", "Set the number of access control channels", channelSettings.count, 1, CORE_MAX_CHANNELS, setChannelCount, true);
         config.addStringQuestion("Multi-Channel", "set-station-name", "Access Control", "Set the station name", stationName, 32, setStationName, true);
     }
     //Repeat Tap Duration
     bool durAvailable = true; //Inverted logic
-    if(inputMode != "INSERT"){
+    if(defaultInputMode != "INSERT"){
         durAvailable = false;
     }
     //Need to go through and add questions based on number of channels manually
     //Since we have no way to pass the channel number to the function.
-    config.addIntegerQuestion("Tap Durations", "0", "Access Control", "Channel 0 Tap Duration (seconds)", channels.tapDurations[0], 0, 86400, tapdur0, true, durAvailable);
-    if(channels.count > 1){
-        config.addIntegerQuestion("Tap Durations", "1", "Access Control", "Channel 1 Tap Duration (seconds)", channels.tapDurations[1], 0, 86400, tapdur1, true, durAvailable);
-        if(channels.count > 2){
-            config.addIntegerQuestion("Tap Durations", "2", "Access Control", "Channel 2 Tap Duration (seconds)", channels.tapDurations[2], 0, 86400, tapdur2, true, durAvailable);
-            if(channels.count > 3){
-                config.addIntegerQuestion("Tap Durations", "3", "Access Control", "Channel 3 Tap Duration (seconds)", channels.tapDurations[3], 0, 86400, tapdur3, true, durAvailable);
+    config.addIntegerQuestion("Tap Durations", "0", "Access Control", "Channel 0 Tap Duration (seconds)", channelSettings.tapDurations[0], 0, 86400, tapdur0, true, durAvailable);
+    if(channelSettings.count > 1){
+        config.addIntegerQuestion("Tap Durations", "1", "Access Control", "Channel 1 Tap Duration (seconds)", channelSettings.tapDurations[1], 0, 86400, tapdur1, true, durAvailable);
+        if(channelSettings.count > 2){
+            config.addIntegerQuestion("Tap Durations", "2", "Access Control", "Channel 2 Tap Duration (seconds)", channelSettings.tapDurations[2], 0, 86400, tapdur2, true, durAvailable);
+            if(channelSettings.count > 3){
+                config.addIntegerQuestion("Tap Durations", "3", "Access Control", "Channel 3 Tap Duration (seconds)", channelSettings.tapDurations[3], 0, 86400, tapdur3, true, durAvailable);
                 #if CORE_MAX_CHANNELS > 4
                     #error "TOO MANY CHANNELS!"
                 #endif
@@ -242,9 +243,9 @@ void updateConfig(){
         config.updateInformation("WiFi", "rssi", "Network Unavailable");
     }
     //Hobbs Time:
-    for(int i = 0; i < channels.count; i++){
+    for(int i = 0; i < channelSettings.count; i++){
         String source = "Channel " + String(i);
-        float hobbsHours = channels.hobbsSeconds[i] / 3600;
+        float hobbsHours = accessHobbsNow(i) / 3600;
         config.updateInformation(source, "channel-hobbs", String(hobbsHours));
     }
     //Uptime:
@@ -278,7 +279,7 @@ void pingServer(bool pressed){
     }
 }
 void pingRIT(bool pressed){
-    //Called when the order to pin www.rit.edu (to test general network connectivity) comes in.
+    //Legacy callback name; this currently tests general connectivity by pinging www.google.com.
     if(!pressed) return;
     config.updateCommand("Network", "ping-rit", "[time] Pinging www.rit.edu, standby...");
     config.update(); //Force an update from within the function.
@@ -540,10 +541,10 @@ void restartDevice(bool pressed){
 void setRestartIdle(bool pressed){
     //Set the "restart when unused" flag
     if(pressed){
-        restartWhenUnused = true;
+        accessPostPayload(AccessEventType::ApiCommand, "{\"flags\":{\"restartWhenUnused\":true}}");
         config.updateCommand("Restart", "restart-idle", "[bad]WARNING: Device will restart immediately next time it is not in use!");
     } else{
-        restartWhenUnused = false;
+        accessPostPayload(AccessEventType::ApiCommand, "{\"flags\":{\"restartWhenUnused\":false}}");
         config.updateCommand("Restart", "restart-idle", "Disabled restart when unused.");
     }
 }

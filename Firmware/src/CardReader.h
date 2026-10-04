@@ -26,7 +26,7 @@
 
 //Struct for other tasks to use:
 struct CardInfo {
-	bool present = false;           //True while a card is present (in INSERT mode)
+	bool present = false;           //True while a card is treated as present in either input mode
 	String UID = "";                //UID of the current card, i.e. the current user (was currentUserUid)
     bool readFailed = false;        //Set to true to indicate we could not read the present card - maybe not a real NFC?
 };
@@ -42,4 +42,4 @@ extern struct CardInfo card;
 extern EventGroupHandle_t cardEvents; //Created in cardReaderInit() (CardReader.cpp)
 
 void cardReaderInit();                //Creates cardEvents; call before starting any task that waits on it
-void runCardReaderLoop(void *pvParameters); //Task entry point, matches runMachineStateLoop()
+void runCardReaderLoop(void *pvParameters); //Task entry point, matches the other tasks

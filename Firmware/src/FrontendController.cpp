@@ -10,13 +10,14 @@ Used to handle the secondary MCU that is present on 2.3.2 hardware, which handle
 #include "Globals.h"
 #include "FrontendController.h"
 
+//The V2 frontend sends newline-delimited B n and S1/S2 n records; these fields are read by fixed character offsets.
 void runFrontendController(void *pvParameters) {
 #if !CORE_HAS_LOCAL_AUDIO_VISUAL
   unsigned long long nextPollTime = 0;
   while (true) {
     if (nextPollTime <= millis64()) {
       nextPollTime = millis64() + 1000;
-      frontend.println("P");
+      frontendSend("P");
     }
 
     while (frontend.available()) {

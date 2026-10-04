@@ -81,7 +81,6 @@ struct MqttState {
 	unsigned long long nextPingTime = 0;
 	String welcomeResponse;
 	bool newWelcome = false;
-	bool welcomingPending = false;
 	String baseTopic;
 	String statusMessage;
 	bool messageToSend = false;
@@ -105,26 +104,12 @@ struct SystemState {
 	unsigned long long nextStatusTime = 0;
 };
 
-struct ChannelState {
+//Stored channel configuration (from settings). Runtime channel state lives in the AccessManager snapshot.
+struct ChannelSettings {
 	static constexpr byte kMaximumChannels = 4;
 
 	byte count = 0;
-	bool access[kMaximumChannels] = {false, false, false, false};
-	String states[kMaximumChannels] = {"UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN"};
-	String lastStates[kMaximumChannels] = {"UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN"};
-	String changeReasons[kMaximumChannels];
-	String authorizationReasons[kMaximumChannels];
-	String reportedStates[kMaximumChannels] = {"UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN"};
-	unsigned long tapDurations[kMaximumChannels] = {0, 0, 0, 0};
-	unsigned long long tapExpirationTimes[kMaximumChannels] = {0, 0, 0, 0};
-	volatile unsigned long hobbsSeconds[kMaximumChannels] = {0, 0, 0, 0};
-};
-
-//Struct for storing information related to the current user('s card)
-struct UserInfo {
-	//TODO eventually will use this as part of the re-organization of the global variables
-	//Currently only used for offline list stuff
-	bool inOfflineList = false;
+	unsigned long tapDurations[kMaximumChannels] = {0, 0, 0, 0}; //Seconds
 };
 
 struct KeepAlivePing {
@@ -135,7 +120,6 @@ struct KeepAlivePing {
 	bool pingPending = false;
 };
 
-bool anyChannelMatcheschannelState(String targetState);
 String disconnectReasonToString(uint8_t reason);
 
 void sendDisplaychannelState(bool sendRarely = false, bool sendFrequently = true);
@@ -158,9 +142,18 @@ void publishMqttstatusMessage(String topic, String payload);
 String getBaseMacAddress();
 void sendStartupstatusMessage(String message);
 String calculateSha256(String input);
-void IRAM_ATTR updateHobbsCounter(void* arg);
 
 // Shared objects.
+#ifndef MEMORY_DIAG
+#define MEMORY_DIAG 0
+#endif
+#if MEMORY_DIAG
+void printMemoryReport(const char *tag);
+void runMemoryDiagLoop(void *pvParameters);
+#define MEM_CHECKPOINT(tag) printMemoryReport(tag)
+#else
+#define MEM_CHECKPOINT(tag)
+#endif
 extern ESPConfig config;
 extern Preferences settings;
 extern JsonDocument ConfigJson;
@@ -178,6 +171,7 @@ extern SPARKFUN_LIS2DH12 accel;
 extern NetworkClientSecure networkclient;
 #if !CORE_HAS_LOCAL_AUDIO_VISUAL
 extern HardwareSerial frontend;
+void frontendSend(const String &line); //Thread-safe; use instead of writing to frontend directly
 extern bool frontendButtonPressed;
 extern bool frontendCardDetect1;
 extern bool frontendCardDetect2;
@@ -190,19 +184,12 @@ extern bool faultBeepRequested;
 extern int MakerspaceNumber;
 extern String hardwareVersion;
 extern bool identifyRequested;
-extern String inputMode;
 extern String defaultInputMode;
-extern bool pendingApproval;
-extern bool accessDenied;
-extern bool lockWhenIdle;
-extern bool restartWhenUnused;
-extern bool welcomeMode;
 extern NetworkState networkState;
 extern volatile uint8_t lastDisconnectReason;
 extern String lastDisconnectReasonVerbose;
 extern unsigned long long lastReconnectTime;
 extern KeepAlivePing keepAlivePing;
-extern bool userWelcomed;
 extern String serialNumber;
 extern NetworkConfiguration networkConfiguration;
 extern int makerspaceId;
@@ -222,15 +209,12 @@ extern unsigned int buzzerTone;
 extern bool resetLed;
 extern bool unlockedBeep;
 extern bool singleBeep;
-extern ChannelState channels;
+extern ChannelSettings channelSettings;
+extern String systemNotice; //Non-access message for the display; never affects channel state
 extern String interruptResponse;
-extern bool isInterrupted;
-extern byte interruptCount;
 extern bool updateScreen;
-extern String faultReason;
 extern String hmiMachineNames[4];
 extern String hmiMakerspace;
 extern String hmiDeviceName;
 extern String hmiRole;
 extern String stationName;
-extern UserInfo user;

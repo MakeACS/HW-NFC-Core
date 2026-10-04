@@ -1,14 +1,15 @@
-/* 
-These tasks are responsible for communicating with the frontend, handling things like switch states, LED and buzzer control, etc.
-There are 2 tasks;
-  runAudioVisualController - Converts flags from other tasks into a series of LED lights and buzzer tones.
-  watchRestartButton - Listens for the front button to be held for 5 seconds, restarts the device. All other reset source throughout the code are handled by this task as well.
+/*
+* These tasks handle user-facing audio/visual feedback and restart requests.
+* runAudioVisualController translates access and system state into LED and buzzer
+* output. watchRestartButton detects a three-second button hold and handles reset
+* requests raised elsewhere in the firmware.
 */
 
 #include "Globals.h"
 #include "AudioVisualController.h"
 #include "TaggedSerial.h"
 #include "OfflineList.h"
+#include "AccessManager.h"
 
 namespace {
 TaggedSerial<decltype(::Serial)> audioVisualSerial(::Serial, "[av] ");
@@ -19,7 +20,7 @@ TaggedSerial<decltype(::Serial)> audioVisualSerial(::Serial, "[av] ");
 uint64_t millis64();
 
 void runAudioVisualController(void *pvParameters){
-  unsigned long long OkToLED = 0;
+  // Animation and melody state persist between iterations of this task.
   byte LEDAnimation = 0;
   byte OldLEDAnimation = 0;
   uint64_t AnimationTime = 0;
@@ -31,89 +32,95 @@ void runAudioVisualController(void *pvParameters){
   bool tonePlaying = false;
   bool firstSingleBeepSkipped = false;
   uint64_t MelodyTime = 0;
+  static AccessSnapshot snap; // Keep the relatively large snapshot off the task stack.
   Serial.println(F("runAudioVisualController Started."));
   while(1){
     vTaskDelay(20 / portTICK_PERIOD_MS);
-    //First, set the animation state:
-    //Animation triggers are not exclusive, so if statements written in reverse-priority order.
 
-    //NEW: Since there are 4 channels, we need to consider all 4 before we set a light.
-    //Lighting should be based on the most permissive level currently available...
-    //i.e. if Ch 1 is unlocked and Ch 2 is locked out, show a light as if we are unlocked
-    //But, any channel being in fault or unknown takes priority.
-    //So, we do a reverse-priority order collection of the states here to use for old lighting code.
+    // Build one aggregate access state for the shared indicator: an unlocked
+    // channel wins over idle/locked-out channels, but fault/unknown wins over all.
+    // Access flags come from the snapshot; sound requests are drained from the queue below.
+    accessGetSnapshot(snap);
+    const bool welcomeMode = snap.mode == AccessMode::Welcome;
+    const bool pendingApproval = snap.pendingApproval;
+    const bool accessDenied = snap.accessDenied;
+    const bool userWelcomed = snap.userWelcomed;
+    AccessFeedback feedback;
+    // Transfer every queued feedback event without blocking this periodic task.
+    while(accessFeedback && xQueueReceive(accessFeedback, &feedback, 0) == pdTRUE){
+      switch(feedback){
+        case AccessFeedback::SingleBeep:   singleBeep = true; break;
+        case AccessFeedback::UnlockedBeep: unlockedBeep = true; break;
+        case AccessFeedback::FaultBeep:    faultBeepRequested = true; break;
+      }
+    }
     String LightState = "NOTHING";
     int highestPriority = 0;
-    for (int i = 0; i < channels.count; i++) {
+    for (int i = 0; i < snap.channels.count; i++) {
       int currentPriority = 0;
-
-      // Tier 4 (Absolute Priority): Faults or Unknown states
-      if (channels.states[i] == "FAULT" || channels.states[i] == "UNKNOWN") {
-        currentPriority = 4;
-      } 
-      // Tier 3 (Most Permissive): Active access states
-      else if (channels.states[i] == "UNLOCKED" || channels.states[i] == "ALWAYS_ON") {
-        currentPriority = 3;
-      } 
-      // Tier 2 (Neutral): Waiting for interaction
-      else if (channels.states[i] == "IDLE") {
+      const ChannelState state = snap.channels.ch[i].state;
+      if (state == ChannelState::Fault || state == ChannelState::Unknown) {
+        currentPriority = 4; // Absolute priority.
+      } else if (state == ChannelState::Unlocked || state == ChannelState::AlwaysOn) {
+        currentPriority = 3; // Most permissive.
+      } else if (state == ChannelState::Idle) {
         currentPriority = 2;
-      } 
-      // Tier 1 (Least Permissive): Completely locked out
-      else if (channels.states[i] == "LOCKED_OUT") {
+      } else if (state == ChannelState::LockedOut) {
         currentPriority = 1;
       }
-
-      // If this channel outranks the previous ones, update the LightState
       if (currentPriority > highestPriority) {
+        // Strict comparison preserves the first channel when priorities tie.
         highestPriority = currentPriority;
-        LightState = channels.states[i]; // Inherit the actual state string (e.g., grabs "ALWAYS_ON" vs "UNLOCKED")
+        LightState = toApiString(state);
       }
     }
     if(LightState == "NOTHING"){
       LightState = "UNKNOWN";
     }
 
+    // These checks run in priority order: later matches override earlier ones.
+    // If nothing matches, the previous animation remains selected.
+    // Animation IDs: 0 flashing red; 1 solid red; 2 solid green; 3 solid yellow;
+    // 4 flashing yellow; 5 alternate green/blue; 6 legacy white (blue fallback);
+    // 7 solid blue; 8 solid purple; 9 flashing blue; 10 RGB cycle; 11 red/green.
     if(LightState.equals("IDLE")){
-      //Animation 3: Solid Yellow
+      // Idle: solid yellow.
       LEDAnimation = 3;
     }
     if(welcomeMode){
-      //For now it is solid yellow, TODO switch to a slow blink yellow 10% duty cycle or so to catch user attention.
+      // Welcome mode currently uses solid yellow; consider a slow blink to attract attention.
       LEDAnimation = 3;
     }
-    if(pendingApproval || mqttState.welcomingPending){
-      //Animation 4: Flashing Yellow
+    if(pendingApproval || snap.welcomingPending){
+      // Pending approval or welcome: flashing yellow.
       LEDAnimation = 4;
     }
     if(LightState.equals("UNLOCKED") || LightState.equals("ALWAYS_ON") || userWelcomed){
-      //Animation 2: Solid greenLed
+      // Access granted: solid green.
       LEDAnimation = 2;
     }
     if((LightState.equals("UNKNOWN") && !welcomeMode) || networkState.unavailable){
-      //If any channel is unknown (when not in welcome mode), or the network is unavailable.
-      //Animation 7: Solid blueLed
+      // Unknown access outside welcome mode, or a network outage: solid blue.
       LEDAnimation = 7;
     }
     if((LightState.equals("UNLOCKED") || LightState.equals("ALWAYS_ON")) && networkState.unavailable){
-      //Animation 5: Alternate blue/green
+      // Preserve the granted state during a network outage by alternating green and blue.
       LEDAnimation = 5;
     }
     if(systemState.imminentShutdown){
-      //Play a warning alternating between red and green
-      //Used when a machine is unlocked, but we should tell the user to stop.
+      // Warn users to stop before an imminent shutdown.
       LEDAnimation = 11;
     }
     if(LightState.equals("LOCKED_OUT") || accessDenied){
-      //Animation 1: Solid redLed
+      // Access denied: solid red.
       LEDAnimation = 1;
     }
     if(identifyRequested){
-      //Animation 9: Flashing blueLed
+      // Device identification: flashing blue.
       LEDAnimation = 9;
     }
     if(resetLed){
-      //Animation 8: Solid Purple
+      // Reset button held: solid purple.
       LEDAnimation = 8;
     }
     if(LightState.equals("FAULT")){
@@ -122,24 +129,25 @@ void runAudioVisualController(void *pvParameters){
     if(gamerMode){
       LEDAnimation = 10;
     }
-    //Next, see if the animation changed;
+    // Animation IDs map to the color/pattern cases in the switch below. Reset
+    // the animation clock when the selection changes so the first block is immediate.
     if(LEDAnimation != OldLEDAnimation){
       OldLEDAnimation = LEDAnimation;
-      AnimationTime = 0; //Force an update of the animation block
+      AnimationTime = 0; // Force an immediate animation update.
     } 
     if(AnimationTime <= millis64()){
-      //It is time to advance to the next animation block
+      // Advance the pattern phase; network-loss alternation is deliberately slower.
       AnimationBlock++;
       if(LEDAnimation == 5){
-        //Animation 5 runs at a slower speed
+        // Animation 5 runs at a slower speed.
         AnimationTime = millis64() + 3000;
       } else{
         AnimationTime = millis64() + 400;
       }
-      //Set the animation block here;
+      // Select the RGB output for the current animation phase.
       switch(LEDAnimation){
       case 0:
-        //Flashing redLed
+        // Flash red, then turn the LED off.
         if(AnimationBlock == 1){
           redLed = 255;
           greenLed = 0;
@@ -152,25 +160,25 @@ void runAudioVisualController(void *pvParameters){
         }
       break;
       case 1:
-        //Solid redLed
+        // Solid red.
         redLed = 255;
         greenLed = 0;
         blueLed = 0;
       break;
       case 2:
-        //Solid greenLed
+        // Solid green.
         redLed = 0;
         greenLed = 255;
         blueLed = 0;
       break;
       case 3:
-        //Solid Yellow
+        // Solid yellow.
         redLed = 255;
         greenLed = 255;
         blueLed = 0;
       break;
       case 4:
-        //Flashing Yellow
+        // Flash yellow, then turn the LED off.
         if(AnimationBlock == 1){
           redLed = 255;
           greenLed = 255;
@@ -183,7 +191,7 @@ void runAudioVisualController(void *pvParameters){
         }
       break;
       case 5:
-        //Cycle greenLed/blueLed
+        // Alternate between green and blue.
         if(AnimationBlock == 1){
           redLed = 0;
           greenLed = 255;
@@ -196,29 +204,25 @@ void runAudioVisualController(void *pvParameters){
         }
       break;
       case 6:
-        //Solid White
-        //redLed = 255;
-        //greenLed = 255;
-        //blueLed = 255;
-        //This break the led. go for blue instead.
+        // Legacy white mode uses blue because white damages this LED.
         redLed = 0;
         greenLed = 0;
         blueLed = 255;
       break;
       case 7:
-        //Solid blueLed
+        // Solid blue.
         redLed = 0;
         greenLed = 0;
         blueLed = 255;
       break;
       case 8:
-        //Solid Purple
+        // Solid purple.
         redLed = 255;
         greenLed = 0;
         blueLed = 255;
       break;
       case 9:
-        //Flashing blue
+        // Flash blue, then turn the LED off.
         if(AnimationBlock == 1){
           redLed = 0;
           greenLed = 0;
@@ -231,7 +235,7 @@ void runAudioVisualController(void *pvParameters){
         }
       break;
       case 10:
-        //redLed - greenLed - blueLed
+        // Cycle through red, green, and blue.
         if(AnimationBlock == 1){
           redLed = 255;
           greenLed = 0;
@@ -250,7 +254,7 @@ void runAudioVisualController(void *pvParameters){
         }
       break;
       case 11:
-        //Alternate red-green
+        // Alternate between red and green.
         if(AnimationBlock == 1){
           redLed = 255;
           greenLed = 0;
@@ -268,23 +272,14 @@ void runAudioVisualController(void *pvParameters){
        CBI.setPixelColor(0, redLed, greenLed, blueLed);
       CBI.show();
      #else
-       frontend.println("L " + String(redLed) + "," + String(greenLed) + "," + String(blueLed));
+       frontendSend("L " + String(redLed) + "," + String(greenLed) + "," + String(blueLed));
      #endif
-      /*
-      //If we are here, there is a new LED to send.
-      if(OkToLED <= millis64()){
-        //We enforce updates slower than 3Hz here to ensure no strobing or race conditions
-        OkToLED = millis64() + 333;
-        CBI.setPixelColor(0, redLed, greenLed, blueLed);
-        CBI.show();
-      }
-      */
     }
     
-    //After the LED, we need to set up the buzzer.
-
+    // Choose the highest-priority active sound request. The ordering here is
+    // intentional: unlock/welcome, denial, fault, single beep, then identify.
     if(unlockedBeep || userWelcomed){
-      //The machine has been unlocked
+      // Approved access or welcome feedback.
       Melody = 1;
     } else if(accessDenied){
       Melody = 2;
@@ -292,34 +287,34 @@ void runAudioVisualController(void *pvParameters){
       Melody = 3;
     } else if(singleBeep){
       if(!firstSingleBeepSkipped){
-        //Ignore the very first singleBeep request after boot.
+        // Ignore the first single-beep request after boot.
         firstSingleBeepSkipped = true;
         singleBeep = 0;
       } else{
         Melody = 4;
       }
     } else if(identifyRequested){
-      //Play a constant tone to identify the device
+      // Repeat the identification tone until the request is cleared.
       Melody = 5;
     } else if(DonePlaying){
-      //If none of these apply, turn off the buzzer
+      // No request remains; select silence.
       Melody = 0;
     }
     if(Melody != OldMelody){
-      //Melody has changed!
+      // Start a newly selected sound from its first step.
       OldMelody = Melody;
       DonePlaying = 0;
       MelodyTime = 0;
       MelodyStep = 0;
     } else if((MelodyTime >= millis64()) || DonePlaying){
-      //Melody didn't change and it's not time to advance to the next tone or the system is done playing a tone
+      // No new sound and no tone deadline yet (or the current sound has finished).
       continue;
     }
-    //If we make it here, there is a tone to be changed.
-    MelodyTime = millis64() + 250; //Set the time to change the note again.
+    // Each melody step lasts 250 ms unless the melody explicitly loops.
+    MelodyTime = millis64() + 250;
     switch (Melody){
       case 1:
-        //Approved tone
+        // Approved access: two rising notes.
         switch (MelodyStep){
           case 0:
             buzzerTone = 1500;
@@ -335,7 +330,7 @@ void runAudioVisualController(void *pvParameters){
         }
       break;
       case 2:
-        //Denied tone
+        // Denied access: two descending notes.
         switch (MelodyStep){
           case 0: 
             buzzerTone = 880;
@@ -350,7 +345,7 @@ void runAudioVisualController(void *pvParameters){
         }
       break;
       case 3:
-        //Fault tone
+        // Fault: three short pulses.
         switch (MelodyStep){
           case 0:
             buzzerTone = 1000;
@@ -375,7 +370,7 @@ void runAudioVisualController(void *pvParameters){
         }
       break;
       case 4:
-        //Single beep
+        // Single, short confirmation beep.
         switch(MelodyStep){
           case 0:
             buzzerTone = 1500;
@@ -389,26 +384,25 @@ void runAudioVisualController(void *pvParameters){
       break;
       case 5:
         switch(MelodyStep){
-          //No case 0, this basically makes the sound delay before it starts playing.
+          // Step 0 provides a short lead-in before the repeating identification tone.
           case 1:
             buzzerTone = 2000;
           break;
           case 2:
             buzzerTone = 1500;
             MelodyStep = 0;
-            //This one ends when we command it to, so we don't put DonePlaying here.
-            //Instead, the identifyRequested state ends with the change beep.
+            // Identification repeats until its request is cleared; it is not self-terminating.
           break;
         }
       break;
     }
-    //If we make it here, we should update the buzzer;
+    // Apply the selected tone using local hardware or the frontend protocol.
     if(buzzerTone == 0){
       if(tonePlaying){
        #if CORE_HAS_LOCAL_AUDIO_VISUAL
          noTone(PIN_BUZZER);
        #else
-         frontend.println("B 0");
+         frontendSend("B 0");
        #endif
         tonePlaying = false;
       }
@@ -416,7 +410,7 @@ void runAudioVisualController(void *pvParameters){
      #if CORE_HAS_LOCAL_AUDIO_VISUAL
        tone(PIN_BUZZER, buzzerTone);
      #else
-       frontend.println("B " + String(buzzerTone));
+       frontendSend("B " + String(buzzerTone));
      #endif
       tonePlaying = true;
     }
@@ -429,27 +423,28 @@ void watchRestartButton(void *pvParameters){
   unsigned long long ButtonTime = 0;
   Serial.println(F("watchRestartButton Started"));
   while(1){
-    //First, check if the button is being held to trigger a restart;
+    // Poll at 100 ms intervals. Button polarity differs between local hardware
+    // and the frontend-reported input.
     delay(100);
    #if CORE_HAS_LOCAL_AUDIO_VISUAL
      if(digitalRead(PIN_BUTTON)){
    #else
      if(!frontendButtonPressed){
    #endif
-      //Button is not being pressed
+      // Start a fresh three-second hold window whenever the button is released.
       ButtonTime = millis64() + 3000;
       resetLed = 0;
     } else{
       resetLed = 1;
-      //ALSO: Turn off identify tone if playing. 
+      // A held reset button also cancels device-identification mode.
       identifyRequested = 0;
       if(ButtonTime <= millis64()){
-        //Button has been held long enough to trigger a restart.
+        // The hold window expired; request a restart.
         systemState.resetReason = "Restart Button";
         systemState.requestReset = true;
       }
     }
-    //Next, check if anything has asked for the device to be restarted.
+    // Complete any pending reset, regardless of whether the button requested it.
     if(systemState.requestReset){
       Serial.print(F("Restarting. Source: "));
       Serial.println(systemState.resetReason);
@@ -458,18 +453,18 @@ void watchRestartButton(void *pvParameters){
       CBI.setPixelColor(0, 255, 0, 0);
       CBI.show();
     #else
-      frontend.println("L 0,0,255");
+      frontendSend("L 0,0,255");
     #endif
       settings.putString("system.reset", systemState.resetReason);
       delay(10);
-      //Tell the frontend, if connected;
+      // Notify a connected screen before shutting down.
     #if CORE_HAS_SCREEN
       Serial0.println("{\"command\":\"restart\"}");
       Serial0.flush();
     #endif
 
       settings.end();
-      //Before we restart, let's save our offline list to memory.
+      // Persist offline data before restarting so no recent changes are lost.
       saveListToSPIFFS();
       Serial.flush();
       delay(50);

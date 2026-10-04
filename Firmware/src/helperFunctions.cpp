@@ -1,4 +1,5 @@
 #include "Globals.h"
+#include "AccessManager.h"
 #include "TaggedSerial.h"
 #include "helperFunctions.h"
 #include <mbedtls/oid.h>
@@ -138,10 +139,11 @@ config.updateInformation("Network", "state", "[time]: Attempting to reconnect...
 
   //If we've been failing to reconnect for a long time, the WiFi/TLS stack may be wedged
   //in a state that a simple reconnect can't fix (a known ESP32 issue). Escalate to a full
-  //radio power-cycle. If the outage continues beyond that, runMachineStateLoop's own
-  //network watchdog (in MachineStateController.cpp) will request a device restart once
+  //radio power-cycle. If the outage continues beyond that, the SystemSupervisor's own
+  //network watchdog (in SystemSupervisor.cpp) will request a device restart once
   //it is safe to do so (i.e. no channel is actively unlocked/always-on).
   uint64_t networkDownDuration = millis64() - connectAttemptStart;
+  Serial.printf("[net] Connect attempt, down %us, free heap %u, largest block %u\n", (unsigned)(networkDownDuration / 1000), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   if(!radioResetDone && networkDownDuration > 15000ULL && networkState.transport == NetworkState::Transport::WiFi){ //15 seconds of continuous failure
     Serial.println(F("Network has been down for 15+ seconds. Power-cycling WiFi radio..."));
     WiFi.disconnect(true);
@@ -149,6 +151,8 @@ config.updateInformation("Network", "state", "[time]: Attempting to reconnect...
     delay(500);
     WiFi.mode(WIFI_STA);
     WiFi.begin(networkConfiguration.wifiSsid, networkConfiguration.wifiPassword);
+    WiFi.setSleep(false);          //Power-cycling the radio drops the settings applied at boot
+    WiFi.setAutoReconnect(true);
     radioResetDone = true;
     Serial.println(F("WiFi radio cycled."));
     if(!mqttState.logToSend){
@@ -371,6 +375,7 @@ config.updateInformation("Network", "state", "[time]: Attempting to reconnect...
       NetConnect["disconnectReasonString"] = disconnectReasonToString(lastDisconnectReason);
     }
   }
+  const uint8_t connectReason = lastDisconnectReason;
   lastDisconnectReason = 0; //Reset the reason
   NetConnect["sys_uptime"] = millis64() / 1000;
   NetConnect["net_uptime"] = (millis64() - lastReconnectTime) / 1000;
@@ -398,7 +403,7 @@ config.updateInformation("Network", "state", "[time]: Attempting to reconnect...
   String reasonConfig = "Unknown";
   if(connectBlame == "WiFi"){
     //Blame the wifi with additional info;
-    reasonConfig = "WiFi: " + disconnectReasonToString(lastDisconnectReason);
+    reasonConfig = "WiFi: " + disconnectReasonToString(connectReason);
   } else{
     reasonConfig = connectBlame;
   }
@@ -540,7 +545,7 @@ void migrateLegacySettings() {
     settings.putInt("makerspace.num", settings.getInt("MakerspaceNumber"));
   }
 
-  for (int channel = 0; channel < ChannelState::kMaximumChannels; channel++) {
+  for (int channel = 0; channel < ChannelSettings::kMaximumChannels; channel++) {
     String currentKey = "channels.tap" + String(channel);
     String legacyKey = "TapDur" + String(channel);
     if (!settings.isKey(currentKey.c_str()) && settings.isKey(legacyKey.c_str())) {
@@ -611,15 +616,6 @@ String calculateSha256(String input) {
   }
   
   return hashStr;
-}
-
-void IRAM_ATTR updateHobbsCounter(void* arg) {
-  //This is called in an ISR to increment the Hobbs timer very precisely!
-  for(int i = 0; i < channels.count; i++){
-    if(channels.access[i]){
-      channels.hobbsSeconds[i] = channels.hobbsSeconds[i] + 1;
-    }
-  }
 }
 
 String disconnectReasonToString(uint8_t reason) {
@@ -765,7 +761,7 @@ bool getTLSCert(){
   //Before we accept the new cert, we should check the SHA-256
   String SHATLS = TLSJson["sha"];
   String NewCert = TLSJson["cert"];
-  //The SHA is the hash of "[serialNumber]:[wifiPassword]:[Cert]""
+  //The server hashes "[serialNumber]:[mqttKey]:[Cert]" for this device's certificate response.
   Serial.print(F("JSON Hash:       ")); Serial.println(SHATLS);
   Serial.print(F("Calculated Hash: ")); Serial.println(calculateSha256(serialNumber + ":" + networkConfiguration.mqttKey + ":" + NewCert));
   if(SHATLS.equalsIgnoreCase(calculateSha256(serialNumber + ":" + networkConfiguration.mqttKey + ":" + NewCert))){
@@ -801,7 +797,8 @@ bool getTLSCert(){
   } else{
     //The hashes did not match, potental attack in progress!
     networkState.unavailable = true;
-    faultReason = "TLS hash does not match!";
+    systemNotice = "TLS hash does not match!"; //Message only. Deliberately does not fault the channels.
+
     Serial.println(F("CRITICAL ERROR: ATTEMPT WAS MADE TO LOAD BAD TLS CERTS!"));
     //statusMessage = "Attmpted to load cert with bad hash?";
     //messageToSend = true;
@@ -814,3 +811,26 @@ bool getTLSCert(){
 extern "C" bool verifyRollbackLater() {
   return true;
 }
+
+//Memory diagnostics, compiled in with -D MEMORY_DIAG=1. Prints heap and per-task stack headroom to Serial.
+#if MEMORY_DIAG
+#include "esp_heap_caps.h"
+void printMemoryReport(const char *tag) {
+  Serial.printf("[mem] %s: free=%u largest=%u minEver=%u\n", tag, (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+  const UBaseType_t count = uxTaskGetNumberOfTasks();
+  TaskStatus_t *tasks = (TaskStatus_t *)malloc(count * sizeof(TaskStatus_t));
+  if (!tasks) return;
+  const UBaseType_t got = uxTaskGetSystemState(tasks, count, NULL);
+  for (UBaseType_t i = 0; i < got; i++) {
+    Serial.printf("[mem]   %-24s stack headroom %u bytes\n", tasks[i].pcTaskName, (unsigned)tasks[i].usStackHighWaterMark);
+  }
+  free(tasks);
+}
+void runMemoryDiagLoop(void *pvParameters) {
+  for (;;) {
+    printMemoryReport("periodic");
+    vTaskDelay(pdMS_TO_TICKS(5000));
+  }
+}
+#endif

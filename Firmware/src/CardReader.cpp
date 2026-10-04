@@ -1,5 +1,6 @@
 #include "CardReader.h"
 #include "Globals.h"
+#include "AccessManager.h"
 #include "TaggedSerial.h"
 #include <SPI.h>
 #if CORE_NFC_READER_MFRC630
@@ -74,6 +75,7 @@ static void cardInserted(const String &uid, bool readFailed){
   card.readFailed = readFailed;
   card.present = true;
   xEventGroupSetBits(cardEvents, CARD_EVENT_INSERTED);
+  accessPostCard(true, readFailed ? "" : uid.c_str());
 }
 
 static void cardRemoved(){
@@ -81,6 +83,7 @@ static void cardRemoved(){
   card.UID = "";
   card.readFailed = false;
   xEventGroupSetBits(cardEvents, CARD_EVENT_REMOVED);
+  accessPostCard(false, nullptr);
 }
 
 static String readNfcCardId(){
@@ -198,7 +201,9 @@ void runCardReaderLoop(void *pvParameters){
   while(1){
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    if(inputMode == "TEMP_PRESENT"){
+    static AccessSnapshot inputSnap;
+    accessGetSnapshot(inputSnap);
+    if(inputSnap.inputMode == InputMode::TempPresent){
       //We always scan for a card in TEMP_PRESENT mode, and the card is "removed" when its UID changes or disappears.
       const String detectedUid = readUidWithRetry();
       if(card.present && !detectedUid.equalsIgnoreCase(card.UID)){

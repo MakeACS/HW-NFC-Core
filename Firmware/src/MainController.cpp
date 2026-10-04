@@ -19,8 +19,11 @@ More info: https://github.com/MakeACS/HW-NFC-Core
 #include "AudioVisualController.h"
 #include "DisplayController.h"
 #include "FrontendController.h"
-#include "MachineStateController.h"
+#include "AccessManager.h"
+#include "AccessLegacyBridge.h"
+#include "SystemSupervisor.h"
 #include "CardReader.h"
+#include "BusDriver.h"
 #include "TaggedSerial.h"
 #include "OfflineList.h"
 #include "config.h"
@@ -97,6 +100,15 @@ ESPConfig config;
 NetworkClientSecure networkclient;
 #if !CORE_HAS_LOCAL_AUDIO_VISUAL
 HardwareSerial frontend(1);
+
+//Several tasks write to the frontend UART, so each line is sent as one write under a mutex.
+void frontendSend(const String &line) {
+  static SemaphoreHandle_t lock = xSemaphoreCreateMutex();
+  String out = line + "\r\n";
+  xSemaphoreTake(lock, portMAX_DELAY);
+  frontend.write((const uint8_t *)out.c_str(), out.length());
+  xSemaphoreGive(lock);
+}
 bool frontendButtonPressed = false;
 bool frontendCardDetect1 = false;
 bool frontendCardDetect2 = false;
@@ -119,15 +131,8 @@ unsigned long long lastReconnectTime = 0;
 
 //Variables - System channels.states
 bool identifyRequested = 0; //Set to 1 to play an identification alarm/buzzer.
-String inputMode = "INSERT"; //Stores how we ingest cards.
 String defaultInputMode = "INSERT"; //Stores how we should ingest cards, when not in welcome mode.
-bool pendingApproval = 0; //Set to 1 when we have a card present that hasn't been authed yet, this is used for LED animations. 
-bool accessDenied = 0; //Set to 1 when a card is present but has been denied, for LED animations. 
-bool lockWhenIdle = 0;
-bool restartWhenUnused = 0;
-bool welcomeMode = 0; //If 1, we are acting as a welcome reader and not a normal reader.
 NetworkState networkState;
-bool userWelcomed = 0;
 
 //Variables - Config
 String serialNumber;
@@ -136,7 +141,6 @@ int makerspaceId;
 
 MqttState mqttState;
 
-UserInfo user;
 
 Device sensorList[10];
 
@@ -160,7 +164,8 @@ bool singleBeep = 0;
 
 unsigned long long nextConfigUpdate = 0; //Tracks how often we should be updating the config frontend.
 
-ChannelState channels;
+ChannelSettings channelSettings;
+String systemNotice = "";
 
 //Interrupt Response Mode:
 //The device can respond to an interrupt in a few different ways;
@@ -172,12 +177,9 @@ ChannelState channels;
 //4: "MESSAGE" - Simply notify the server a fauly occurred, but don't do anything.
   //Useful for situtations where interrupt is used to convey info, but not necessarily shut down access.
 String interruptResponse = "FAULT";
-bool isInterrupted = false; //Tracks if we are in a maintained interrupt mode, so we do not constantly re-assert states.
-byte interruptCount = 0; //Counts how many times we read an interrupt as we cycle, for debouncing.
 
 //Variables related to any connected screen;
 bool updateScreen = false;
-String faultReason = "";
 String hmiMachineNames[4] = {"","","",""};
 String hmiMakerspace;
 String hmiDeviceName;
@@ -188,7 +190,15 @@ KeepAlivePing keepAlivePing;
 
 bool RTSjustStarted = true; //Tracks if we just started, to send reset reason on boot.
 
+//Creates a task and reports loudly if the heap could not provide it, so a missing task is never silent.
+static void startTask(TaskFunction_t fn, const char *name, uint32_t stackBytes, void *arg) {
+  if (xTaskCreate(fn, name, stackBytes, arg, 5, NULL) != pdPASS) {
+    Serial.printf("[boot] FAILED to start task %s (%u byte stack), free heap %u, largest block %u\n", name, (unsigned)stackBytes, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+  }
+}
+
 void setup() {
+  MEM_CHECKPOINT("setup entry");
   // put your setup code here, to run once:
 
   //In case we crashed, immediately turn off buzzer and set LED red;
@@ -203,22 +213,7 @@ void setup() {
   pinMode(PIN_BUTTON, INPUT); 
 #endif
 
-#if CORE_HAS_LOCAL_CHANNEL_OUTPUTS
-  pinMode(PIN_ACCESS, OUTPUT);
-  pinMode(PIN_IODIR_1, OUTPUT);
-  digitalWrite(PIN_IODIR_1, HIGH);
-  pinMode(PIN_IODIR_2, OUTPUT);
-  digitalWrite(PIN_IODIR_2, HIGH);
-  pinMode(PIN_IODIR_3, OUTPUT);
-  digitalWrite(PIN_IODIR_3, HIGH);
-  pinMode(PIN_IODIR_4, OUTPUT);
-  digitalWrite(PIN_IODIR_4, HIGH);
-  pinMode(PIN_GPIO_1, OUTPUT);
-  pinMode(PIN_GPIO_2, OUTPUT);
-  pinMode(PIN_GPIO_3, OUTPUT);
-  pinMode(PIN_GPIO_4, OUTPUT);
-#endif
-  pinMode(PIN_INTERRUPT, INPUT_PULLUP);
+  busDriverInit(); //Bus pins (access, GPIO, interrupt) are owned by the BusDriver
 
 #if USE_INTERNAL_USB_CDC
   //Set all USB-related settings, including VID/PID, product name, etc.
@@ -248,18 +243,22 @@ void setup() {
 #endif
 #if !CORE_HAS_LOCAL_AUDIO_VISUAL
   frontend.begin(115200, SERIAL_8N1, PIN_FRONTEND_RX, PIN_FRONTEND_TX);
-  frontend.println("B 0"); //Set buzzer to 0
-  frontend.println("L 0,0,255"); //Set LED to blue
+  frontendSend("B 0"); //Set buzzer to 0
+  frontendSend("L 0,0,255"); //Set LED to blue
 #endif
 
   Serial.println(F("STARTUP"));
   Serial.flush();
   delay(500);
 
+  MEM_CHECKPOINT("boot, before tasks");
+#if MEMORY_DIAG
+  xTaskCreate(runMemoryDiagLoop, "memdiag", 3072, NULL, 1, NULL);
+#endif
   sendStartupstatusMessage("Starting Tasks...");
 
-  xTaskCreate(runAudioVisualController, "runAudioVisualController", 2048, NULL, 5, NULL);
-  xTaskCreate(watchRestartButton, "watchRestartButton", 4096, NULL, 5, NULL);
+  startTask(runAudioVisualController, "runAudioVisualController", 2048, NULL);
+  startTask(watchRestartButton, "watchRestartButton", 2560, NULL);
 
   //Start i2C
 #if CORE_HAS_ACCELEROMETER
@@ -291,6 +290,7 @@ void setup() {
 
   //Load settings from memory
   settings.begin("settings", false);
+  MEM_CHECKPOINT("after settings.begin");
 
   //Get our serial number;
 
@@ -350,10 +350,10 @@ void setup() {
   }
 
   if(!settings.isKey("channels.count")){
-    //channels.count is new in 2.1.4, set to 1 if no value
+    //channelSettings.count is new in 2.1.4, set to 1 if no value
     settings.putString("channels.count", "1");
   }
-  channels.count = settings.getString("channels.count").toInt();
+  channelSettings.count = settings.getString("channels.count").toInt();
 
   if(!settings.isKey("channels.tap0")){
     //Tap Duration is new in 2.1.4, set to 0 if no value.
@@ -364,7 +364,7 @@ void setup() {
   }
   for(int i = 0; i < 4; i++){
     String key = "channels.tap" + String(i);
-    channels.tapDurations[i] = settings.getUInt(key.c_str());
+    channelSettings.tapDurations[i] = settings.getUInt(key.c_str());
   }
 
   if(!settings.isKey("access.input")){
@@ -372,7 +372,6 @@ void setup() {
     settings.putString("access.input", "INSERT");
   }
   defaultInputMode = settings.getString("access.input");
-  inputMode = defaultInputMode;
 
   if(!settings.isKey("access.intResp")){
     //Interrupt Response is new in 2.1.4, set to "FAULT" if no value.
@@ -420,6 +419,7 @@ void setup() {
   makerspaceId = settings.getString("makerspace.id").toInt();
 
   Serial.println(F("Settings loaded."));
+  MEM_CHECKPOINT("settings loaded");
   Serial.flush();
 
   sendStartupstatusMessage("Settings Loaded.");
@@ -464,6 +464,7 @@ void setup() {
       }
     });
     WiFi.begin(networkConfiguration.wifiSsid, networkConfiguration.wifiPassword);
+    MEM_CHECKPOINT("after WiFi.begin");
     WiFi.setSleep(false);
     WiFi.setAutoReconnect(true);
     unsigned long WiFiStart = millis64();
@@ -509,7 +510,8 @@ void setup() {
     // We only verify and check for updates if we are actually online.
 
     if(settings.getBool("ota.enable", true)){
-      sendStartupstatusMessage("Checking for OTA...");
+      MEM_CHECKPOINT("before OTA check");
+    sendStartupstatusMessage("Checking for OTA...");
       Serial.println(F("Checking for OTA..."));
 
       // 1. Configure all OTA settings first
@@ -525,9 +527,11 @@ void setup() {
       // 2. Verify the current firmware can reach the JSON (or rollback)
       String jsonUrl = settings.getString("ota.url", "https://raw.githubusercontent.com/MakeACS/HW-NFC-Core/main/Firmware/OTADirectory.json");
       otaVerified = ota.VerifyOrRevert(jsonUrl.c_str(), FIRMWARE_VERSION);
+      MEM_CHECKPOINT("after OTA verify");
 
       // 3. Check for a new update before we continue;
       int otaresp = ota.CheckForOTAUpdate(jsonUrl.c_str(), FIRMWARE_VERSION);
+      MEM_CHECKPOINT("before OTA update check");
       Serial.print(F("OTA Response: "));
       Serial.println(getOtaErrorText(otaresp));
 
@@ -677,6 +681,7 @@ void setup() {
   config.updateInformation("Uptime", "reason", systemState.resetReason);
   #endif
 
+  MEM_CHECKPOINT("before MQTT connect");
   sendStartupstatusMessage("Connecting MQTT...");
 
   mqtt.begin(socket); //Enable MQTT on the websocket
@@ -695,31 +700,29 @@ void setup() {
   config.updateInformation("Total", "offline-count", String(getOfflineListSize()));
   #endif
 
-  //Initialize a precise timer for the Hobbs Timer
-  Serial.println(F("Starting Critical Timer for Hobbs Time..."));
-  const esp_timer_create_args_t timer_args = {
-    .callback = &updateHobbsCounter,  // The function to run
-    .arg = NULL,                   // Arguments passed to the function (optional)
-    .name = "one_second_timer"     // Name for debugging
-  };
-  esp_timer_handle_t periodic_timer;
-  esp_err_t err = esp_timer_create(&timer_args, &periodic_timer);
-  if (err == ESP_OK) {
-    //Start the timer to repeat every 1,000,000 microseconds (1 second)
-    esp_timer_start_periodic(periodic_timer, 1000000);
-    Serial.println("Timer started successfully!");
-  } else {
-    Serial.printf("Timer creation failed with error: %d\n", err);
-  }
-
   //Time to loop!
-  xTaskCreate(runFrontendController, "Frontend", 2048, NULL, 5, NULL);
-  xTaskCreate(runCardReaderLoop, "runCardReaderLoop", 4096, NULL, 5, NULL);
-  xTaskCreate(runMachineStateLoop, "runMachineStateLoop", 4096, NULL, 5, NULL);
+  startTask(runFrontendController, "Frontend", 2048, NULL);
+  static AccessConfig accessConfig;
+  accessConfig.inputMode = inputModeFromApiString(defaultInputMode.c_str());
+  accessConfig.interruptResponse = interruptResponseFromApiString(interruptResponse.c_str());
+  accessConfig.channelCount = channelSettings.count;
+  for(int i = 0; i < CORE_MAX_CHANNELS; i++){
+    accessConfig.tapDurationMs[i] = channelSettings.tapDurations[i] * 1000;
+  }
+  accessManagerInit(accessConfig);
+  startTask(runAccessManagerLoop, "runAccessManagerLoop", 4096, &accessConfig);
+  #ifdef REDUCED_CONFIG
+  startTask(runAccessBridgeLoop, "runAccessBridgeLoop", 2048, NULL); //No config frontend on this build
+#else
+  startTask(runAccessBridgeLoop, "runAccessBridgeLoop", 4096, NULL);
+#endif
+  startTask(runCardReaderLoop, "runCardReaderLoop", 4096, NULL);
+  startTask(runBusDriverLoop, "runBusDriverLoop", 3072, NULL);
+  startTask(runSystemSupervisorLoop, "runSystemSupervisorLoop", 2560, NULL);
   gamerMode = 0; //Disable the startup lighting
 
 #if CORE_HAS_SCREEN
-  xTaskCreate(runScreenController, "ScreenController", 4096, NULL, 5, NULL);
+  startTask(runScreenController, "ScreenController", 4096, NULL);
 #endif
 
 }
@@ -749,6 +752,19 @@ void loop() {
     mqttState.logToSend = true;
   }
 
+  //Report interrupt edges to the history when the response mode is MESSAGE
+  {
+    static bool lastInterrupted = false;
+    bool nowInterrupted = bus.interrupted;
+    if(nowInterrupted != lastInterrupted && interruptResponse == "MESSAGE" && !mqttState.messageToSend){
+      lastInterrupted = nowInterrupted;
+      mqttState.statusMessage = nowInterrupted ? "Interrupt Triggered!" : "Interrupt Cleared";
+      mqttState.messageToSend = true;
+    } else if(nowInterrupted != lastInterrupted && interruptResponse != "MESSAGE"){
+      lastInterrupted = nowInterrupted;
+    }
+  }
+
   //Ping-related checks;
   if(keepAlivePing.nextTime <= millis64()){
     //It is time to send a ping 
@@ -776,6 +792,21 @@ void loop() {
 
   //Step 4: Communicate with the server
 
+  //Outbound messages are built from the AccessManager's published snapshot.
+  static AccessSnapshot snap;
+  static ChannelState reportedStates[CORE_MAX_CHANNELS]; //Last state the server was told about
+  static AccessMode lastSnapMode = AccessMode::Normal;
+  accessGetSnapshot(snap);
+  const bool welcomeMode = snap.mode == AccessMode::Welcome;
+  if(lastSnapMode == AccessMode::Welcome && !welcomeMode){
+    //State changes were not reported while welcoming, so report from scratch.
+    for(int i = 0; i < CORE_MAX_CHANNELS; i++) reportedStates[i] = ChannelState::Unknown;
+  }
+  lastSnapMode = snap.mode;
+  bool anyStateUnknown = false;
+  for(int i = 0; i < snap.channels.count; i++){
+    if(snap.channels.ch[i].state == ChannelState::Unknown) anyStateUnknown = true;
+  }
   //Only send messages if we have a connection:
   if(mqtt.isConnected() && !networkState.unavailable){
 
@@ -827,21 +858,18 @@ void loop() {
       if(!welcomeMode){
         //We don't report state change when we are in welcoming.
         JsonArray stateChannels = outgoing["channels"].to<JsonArray>();
-        for( int i = 0; i < channels.count; i++){
-          if(channels.states[i] != channels.reportedStates[i]){
+        for( int i = 0; i < snap.channels.count; i++){
+          const Channel &c = snap.channels.ch[i];
+          if(c.state != reportedStates[i]){
             JsonObject stateObject = stateChannels.createNestedObject();
             stateObject["channelID"] = i;
-            stateObject["fromState"] = channels.reportedStates[i];
-            stateObject["toState"] = channels.states[i];
+            stateObject["fromState"] = toApiString(reportedStates[i]);
+            stateObject["toState"] = toApiString(c.state);
             //The server doesn't recognize the "LOCK_TEMP" state change reason
             //So we replace if with "LOCAL":
-            if(channels.changeReasons[i] == "LOCK_TEMP"){
-              stateObject["reason"] = "LOCAL";
-            } else{
-              stateObject["reason"] = channels.changeReasons[i];
-            }
+            stateObject["reason"] = (c.changeReason == ChangeReason::LockTemp) ? "LOCAL" : toApiString(c.changeReason);
             //Update the preserved last state;
-            channels.reportedStates[i] = channels.states[i];
+            reportedStates[i] = c.state;
           }
         }
         outgoing["currentCardTag"] = card.UID;
@@ -857,14 +885,14 @@ void loop() {
       //Report the current configuration
       mqttState.reportConfig = false;
       JsonArray configChannels = outgoing["channels"].to<JsonArray>();
-      for(int i = 0; i < channels.count; i++){
+      for(int i = 0; i < channelSettings.count; i++){
         JsonObject configObject = configChannels.createNestedObject();
         configObject["channelID"] = i;
-        configObject["tempDuration"] = channels.tapDurations[i];
+        configObject["tempDuration"] = channelSettings.tapDurations[i];
       }
       //Temp disable network inteface reporting, as it is not yet implemented on the server side.
       //outgoing["networkInterface"] = getActiveNetworkInterface();
-      outgoing["inputMode"] = inputMode;
+      outgoing["inputMode"] = toApiString(snap.inputMode);
       JsonObject configDeployment = outgoing["deployment"].to<JsonObject>();
       configDeployment["SN"] = serialNumber;
       JsonArray configComponents = configDeployment["components"].to<JsonArray>();
@@ -887,8 +915,8 @@ void loop() {
         }
       }
       JsonObject flags = outgoing["flags"].to<JsonObject>();
-      flags["lockWhenIdle"] = lockWhenIdle;
-      flags["restartWhenUnused"] = restartWhenUnused;
+      flags["lockWhenIdle"] = snap.lockWhenIdle;
+      flags["restartWhenUnused"] = snap.restartWhenUnused;
       flags["welcoming"] = welcomeMode;
       String FWVer = "CoreDuino " + String(FIRMWARE_VERSION);
       outgoing["firmware"] = FWVer;
@@ -917,11 +945,9 @@ void loop() {
       //Check if any of the states or HobbsTimers are unknown;
       bool AskForStates = false;
       bool AskForHobbs = false;
-      for(int i = 0; i < channels.count; i++){
-        if(channels.states[i] == "UNKNOWN"){
-          AskForStates = true;
-        }
-        if(channels.hobbsSeconds[i] == 0){
+      AskForStates = anyStateUnknown;
+      for(int i = 0; i < snap.channels.count; i++){
+        if(snap.channels.ch[i].hobbsNow(millis64()) == 0){
           AskForHobbs = true;
         }
       }
@@ -941,17 +967,17 @@ void loop() {
       String InfoTopic = mqttState.baseTopic + "/info/request";
       publishMqttstatusMessage(InfoTopic, InfoPayload);
     }
-    if(mqttState.sendStatus && !anyChannelMatcheschannelState("UNKNOWN")){
+    if(mqttState.sendStatus && !anyStateUnknown){
       //Send our current status to the server, we do not send it if we do not know our state. 
       mqttState.sendStatus = false;
       JsonArray statusChannels = outgoing["channels"].to<JsonArray>();
       if(!welcomeMode){
         //We don't send this in welcoming mode
-        for(int i = 0; i < channels.count; i++){
+        for(int i = 0; i < snap.channels.count; i++){
           JsonObject statusObject = statusChannels.createNestedObject();
           statusObject["channelID"] = i;
-          statusObject["state"] = channels.states[i];
-          statusObject["hobbsTime"] = channels.hobbsSeconds[i];
+          statusObject["state"] = toApiString(snap.channels.ch[i].state);
+          statusObject["hobbsTime"] = snap.channels.ch[i].hobbsNow(millis64());
         }
       }
       outgoing["currentCardTag"] = card.UID;
@@ -976,104 +1002,17 @@ void loop() {
 
     JsonDocument incoming; //Json doucment to parse the incoming
 
-    if(mqttState.newAuth){
-      //Process a response to an auth request.
+    //Access-related API responses are handed to the AccessManager, which parses and acts on them.
+    //If its inbox is full the flag stays set and we try again next pass.
+    if(mqttState.newAuth && accessPostPayload(AccessEventType::ApiAuthResult, mqttState.authResponse.c_str())){
       mqttState.newAuth = false;
-      deserializeJson(incoming, mqttState.authResponse);
-      String AuthID = incoming["cardTagID"].as<String>();
-      pendingApproval = false;
-      bool SendUnlockedBeep = false;
-      bool SendAccessDenied = false;
-      for(JsonVariant v : incoming["channels"].as<JsonArray>()){
-        int ch = v["channelID"] | 0;
-        if(ch >= 0 && ch < channels.count){
-          bool IsAuthed = v["approved"].as<bool>();
-          channels.authorizationReasons[ch] = v["reason"].as<String>();
-          if(channels.states[ch] == "IDLE" || (channels.states[ch] == "UNLOCKED" && inputMode == "TEMP_PRESENT")){ //Unlock only if idle, or re-up unlocked channels if in tap-present mode.
-            if(IsAuthed){
-              Serial.println(F("Access Granted!"));
-              if(AuthID == card.UID){
-                Serial.println(F("UIDs match. Unlocking."));
-                if(!user.inOfflineList){
-                  //Add the user to the offline list:
-                  updateOfflineList(card.UID, rtc.getEpoch());
-                  Serial.println(F("User added to offline list."));
-                  #ifndef REDUCED_CONFIG
-                  config.updateInformation("Current ID", "on-list", "Just added!");
-                  config.updateInformation("Total", "offline-count", String(getOfflineListSize()));
-                  #endif
-                }
-                channels.states[ch] = "UNLOCKED";
-                channels.changeReasons[ch] = "AUTHED"; 
-                SendUnlockedBeep = true;
-                if(inputMode == "TEMP_PRESENT"){
-                  //Add all the times now;
-                  channels.tapExpirationTimes[ch] = channels.tapDurations[ch] * 1000 + millis64();
-                }
-              }
-            } else{
-              Serial.println(F("accessEnabled Denied!"));
-              if(card.present){
-                SendAccessDenied = 1;
-              }
-            }
-          } else{
-            Serial.println(F("Ignoring auth due to improper state."));
-          }
-        }
-      }
-      if(SendUnlockedBeep){
-        //We do it this way so we don't trigger the beep 4 times
-        unlockedBeep = true;
-      }
-      if(SendAccessDenied){
-        accessDenied = true;
-      }
       updateScreen = true;
     }
-    if(mqttState.newInfo){
-      //Process a response to an info request.
+    if(mqttState.newInfo && accessPostPayload(AccessEventType::ApiInfo, mqttState.infoResponse.c_str())){
+      //State, hobbs and flags go to the AccessManager. We keep the parts that are not access related.
+      Serial.println(F("[main] Info response handed to the AccessManager."));
       mqttState.newInfo = false;
       deserializeJson(incoming, mqttState.infoResponse);
-      //Set the state;
-      if (incoming["state"].is<JsonArray>()) {
-        for (JsonObject item : incoming["state"].as<JsonArray>()) {
-          int id = item["id"] | -1; // Default to -1 if missing
-          
-          // Bounds check to avoid crashing the MCU with array out-of-bounds
-          if (id >= 0 && id < channels.count) {
-            channels.states[id] = item["state"].as<String>();
-            channels.changeReasons[id] = "COMMANDED";
-            if(channels.states[id] == "FAULT"){
-              //We don't go back to a fault state;
-              channels.states[id] = "LOCKED_OUT";
-            }
-            if (channels.states[id] == "UNLOCKED" || channels.states[id] == "ALWAYS_ON") {
-              //We don't go back to an unlocked state;
-              channels.states[id] = "IDLE";
-            }
-            #ifndef REDUCED_CONFIG
-            //Also tell the config frontend the state and change reason:
-            String source = "Channel " + String(id);
-            config.updateInformation(source, "channel-state", channels.states[id]);
-            config.updateInformation(source, "channel-reason", "COMMANDED");
-            #endif
-          }
-        }
-        singleBeep = 1;
-      }
-
-      // Process the "hobbsTime" array
-      if (incoming["hobbsTime"].is<JsonArray>()) {
-        for (JsonObject item : incoming["hobbsTime"].as<JsonArray>()) {
-          // Notice this uses "channelID" instead of "id"
-          int ch = item["channelID"] | -1; 
-          
-          if (ch >= 0 && ch < channels.count) {
-            channels.hobbsSeconds[ch] = item["hobbsTime"].as<unsigned long>(); 
-          }
-        }
-      }
       //Process the HMI info:
       if(incoming.containsKey("hmi")){
         hmiRole = incoming["hmi"]["role"].as<String>();
@@ -1082,13 +1021,15 @@ void loop() {
         JsonArray channelsArray = incoming["hmi"]["channels"];
         for (JsonObject channel : channelsArray){
           int channelID = channel["channelID"];
-          hmiMachineNames[channelID] = channel["pairedEntity"].as<String>();
+          if(channelID >= 0 && channelID < CORE_MAX_CHANNELS){
+            hmiMachineNames[channelID] = channel["pairedEntity"].as<String>();
+          }
         }
         #ifndef REDUCED_CONFIG
         //Update the frontend with the new info;
         config.updateInformation("Device", "makerspace", hmiMakerspace);
         config.updateInformation("Device", "name", hmiDeviceName);
-        for(int i = 0; i <= channels.count; i++){
+        for(int i = 0; i < channelSettings.count; i++){
           String source = "Channel " + String(i);
           config.updateInformation(source, "channel-equipment", hmiMachineNames[i]);
         }
@@ -1103,133 +1044,14 @@ void loop() {
         //Once we know the time, we should clean up our offline user list;
         cleanupOfflineList(rtc.getEpoch());
       }
-      //Set flags:
-      if(incoming.containsKey("flags")){
-        JsonObject flagObj = incoming["flags"].as<JsonObject>();
-        if(flagObj.containsKey("lockWhenIdle")){
-          lockWhenIdle = flagObj["lockWhenIdle"].as<bool>();
-          Serial.print(F("serverAddress set lockWhenIdle to: "));
-          Serial.println(lockWhenIdle);
-        }
-        if(flagObj.containsKey("restartWhenUnused")){
-          restartWhenUnused = flagObj["restartWhenUnused"].as<bool>();
-          Serial.print(F("serverAddress set restartWhenUnused to: "));
-          Serial.println(restartWhenUnused);
-        }
-        if(flagObj.containsKey("welcoming")){
-          if(welcomeMode != flagObj["welcoming"].as<bool>()){
-            welcomeMode = flagObj["welcoming"].as<bool>();
-            if(welcomeMode){
-            Serial.println(F("serverAddress flag set to enter welcoming mode."));
-            #ifndef REDUCED_CONFIG
-            config.updateInformation("General", "mode", "Welcome Reader (Tap)");
-            #endif
-            } else{
-              Serial.println(F("serverAddress flag unset for welcoming mode. Entering state 'UNKNOWN'"));
-              welcomeMode = false;
-              for(int i = 0; i < channels.count; i++){
-                channels.states[i] = "UNKNOWN";
-                channels.changeReasons[i] = "SERVER_COMMANDED";
-              }
-              //We should ask what state we should be in
-              mqttState.requestInfo = true;
-              #ifndef REDUCED_CONFIG
-              config.updateInformation("General", "mode", defaultInputMode);
-              #endif
-            }
-          }
-        }
-      }
-      if(incoming.containsKey("hobbsTime")){
-        for(int i = 0; i < channels.count; i++){
-          channels.hobbsSeconds[i] = incoming["hobbsTime"][i]["hobbsTime"];
-          Serial.print(F("Hobbs timer for channel "));
-          Serial.print(i);
-          Serial.print(F(" set to: "));
-          Serial.print(channels.hobbsSeconds[i]);
-          Serial.println(F(" seconds."));
-        }
-      }
       mqttState.reportConfig = true; //Once we get some info, we should send our configuration.
       mqttState.sendStatus = true; //Once we get some info, we should send our status.
       updateScreen = true;
     }
-    if(mqttState.newCommand){
-      //Process an incoming command.
+    if(mqttState.newCommand && accessPostPayload(AccessEventType::ApiCommand, mqttState.commandResponse.c_str())){
+      //State changes, flags and hobbs go to the AccessManager. Actions stay here.
       mqttState.newCommand = false;
       deserializeJson(incoming, mqttState.commandResponse);
-      //channels.states change command
-      if(incoming["toState"].is<JsonArray>()){
-        JsonArray toStateArray = incoming["toState"].as<JsonArray>();
-        for (JsonVariant v : toStateArray) {
-          int ch = v["id"] | -1;
-          if (ch >= 0 && ch < channels.count) {
-            channels.states[ch] = v["state"] | "UNKNOWN";
-            if(channels.states[ch] == "UNLOCKED" && !card.present){
-              channels.states[ch] = "IDLE";
-            }
-            #ifndef REDUCED_CONFIG
-            //Also tell the config frontend the state and change reason:
-            String source = "Channel " + String(ch);
-            config.updateInformation(source, "channel-state", channels.states[ch]);
-            config.updateInformation(source, "channel-reason", "COMMANDED");
-            #endif
-            channels.changeReasons[ch] = "COMMANDED";
-          }
-        }
-        singleBeep = 1;
-      }
-      //Set flags
-      if(incoming.containsKey("flags")){
-        JsonObject flagObj = incoming["flags"].as<JsonObject>();
-        if(flagObj.containsKey("lockWhenIdle")){
-          lockWhenIdle = flagObj["lockWhenIdle"].as<bool>();
-          Serial.print(F("serverAddress set lockWhenIdle to: "));
-          Serial.println(lockWhenIdle);
-        }
-        if(flagObj.containsKey("restartWhenUnused")){
-          restartWhenUnused = flagObj["restartWhenUnused"].as<bool>();
-          Serial.print(F("serverAddress set restartWhenUnused to: "));
-          Serial.println(restartWhenUnused);
-        }
-        if(flagObj.containsKey("welcoming")){
-          if(welcomeMode != flagObj["welcoming"].as<bool>()){
-            welcomeMode = flagObj["welcoming"].as<bool>();
-            if(welcomeMode){
-            Serial.println(F("serverAddress flag set to enter welcoming mode."));
-            #ifndef REDUCED_CONFIG
-            config.updateInformation("General", "mode", "Welcome Reader (Tap)");
-            #endif
-            } else{
-              Serial.println(F("serverAddress flag unset for welcoming mode. Entering state 'UNKNOWN'"));
-              #ifndef REDUCED_CONFIG
-              config.updateInformation("General", "mode", defaultInputMode);
-              #endif
-              for(int i = 0; i < channels.count; i++){
-                channels.states[i] = "UNKNOWN";
-                channels.changeReasons[i] = "SERVER_COMMANDED";
-              }
-              //We should ask what state we should be in
-              mqttState.requestInfo = true;
-            }
-          }
-        }
-      }
-      //Set HobbsTime
-      if(incoming.containsKey("hobbsTime")){
-        JsonArray hobbsTimeArray = incoming["hobbsTime"].as<JsonArray>();
-        for (JsonVariant v : hobbsTimeArray) {
-          int ch = v["hobbsTime"] | 0;
-          if (ch >= 0 && ch < channels.count) {
-            channels.hobbsSeconds[ch] = v["channelID"] | 0;
-            Serial.print(F("Hobbs timer for channel "));
-            Serial.print(ch);
-            Serial.print(F(" set to: "));
-            Serial.print(channels.hobbsSeconds[ch]);
-            Serial.println(F(" seconds."));
-          }
-        }
-      }
       //Action to do something
       if(incoming.containsKey("action")){
         if(incoming["action"] == "RESTART"){
@@ -1258,28 +1080,8 @@ void loop() {
       }
       updateScreen = true;
     }
-    if(mqttState.newWelcome){
-      //Response to welcoming a user
+    if(mqttState.newWelcome && accessPostPayload(AccessEventType::ApiWelcomeResult, mqttState.welcomeResponse.c_str())){
       mqttState.newWelcome = false;
-      deserializeJson(incoming, mqttState.welcomeResponse);
-      bool IsWelcomed = incoming["welcomed"];
-      String WelcomeID = incoming["cardTagID"];
-      String WelcomeReason = incoming["reason"];
-      if(IsWelcomed){
-        //User was welcomed into the space properly.
-        Serial.println(F("User welcomed!"));
-        if(card.UID == WelcomeID){
-          //The user's card is still here, so beep and light up.
-          userWelcomed = 1;
-        } else{
-          Serial.println(F("But their card isn't here anymore, so we will skip the lights/sounds."));
-        }
-      } else{
-        //User was denied entry into the space.
-        Serial.print(F("User denied! Reason: "));
-        Serial.println(WelcomeReason);
-        accessDenied = 1; //Act like we denied the user access
-      }
       updateScreen = true;
     }
     

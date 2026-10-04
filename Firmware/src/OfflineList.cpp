@@ -7,13 +7,13 @@ std::map<String, uint32_t> offlineAccessList;
 const char* LIST_FILE_PATH = "/offline_list.txt";
 const uint32_t SECONDS_PER_DAY = 86400;
 
-// Adds or updates an entry with a custom expiration date (defaults to 30 days)
+// Stores the expiration epoch; cleanupOfflineList() performs expiry removal separately.
 void updateOfflineList(String id, uint32_t currentTimestamp, uint32_t validDays) {
     uint32_t expirationTimestamp = currentTimestamp + (validDays * SECONDS_PER_DAY);
     offlineAccessList[id] = expirationTimestamp;
 }
 
-// Check if an ID is on the list
+// Expired entries still count as present until cleanupOfflineList() removes them.
 bool checkOfflineList(String id) {
     return offlineAccessList.find(id) != offlineAccessList.end();
 }

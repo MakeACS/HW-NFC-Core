@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+//Prefixes output at each line start while forwarding serial input and control calls unchanged.
 template <typename SerialPort>
 class TaggedSerial {
 public:

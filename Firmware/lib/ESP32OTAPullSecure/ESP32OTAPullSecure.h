@@ -37,8 +37,55 @@ private:
     const char* RootCACert = nullptr;
     bool InsecureHTTPS = false;
 
+    bool BetaChannel = false;
+    bool BetaLoaded = false;
+
+    // Returns the text after the first '-' (e.g. "beta1" for "3.2.0-beta1"), or "" if none
+    static String versionSuffix(const String &v) {
+        int dash = v.indexOf('-');
+        if (dash < 0) return "";
+        String s = v.substring(dash + 1);
+        s.trim();
+        return s;
+    }
+
+    // Decides whether the advertised version should be installed. Returns true to update.
+    bool shouldInstall(const String &remote, const String &current) {
+        if (remote.isEmpty()) return true;
+
+        String remoteSuffix = versionSuffix(remote);
+        String currentSuffix = versionSuffix(current);
+        int cmp = compareVersions(remote, current); // numeric part only
+
+        if (!isBeta()) {
+            // Production devices never install pre-release builds
+            if (!remoteSuffix.isEmpty()) {
+                if (SerialDebug) Serial.println("OTA: Skipping beta firmware on production device.");
+                return false;
+            }
+            // A production device running a beta build always moves to the production build
+            if (!currentSuffix.isEmpty()) return true;
+            return cmp > 0 || (DowngradesAllowed && cmp != 0);
+        }
+
+        if (cmp > 0) return true;
+        if (cmp < 0) return DowngradesAllowed;
+
+        // Same numeric version: install if the suffix differs (beta -> production, or beta -> other beta).
+        // Never move from production to a beta of the same version.
+        if (remoteSuffix == currentSuffix) return false;
+        if (currentSuffix.isEmpty()) return false;
+        return true;
+    }
+
     int compareVersions(String v1, String v2) {
         if (SerialDebug) Serial.printf("OTA Math -> Comparing JSON Version: '%s' vs Current Version: '%s'\n", v1.c_str(), v2.c_str());
+
+        // Ignore any "-suffix" for numeric comparison
+        int dash1 = v1.indexOf('-');
+        if (dash1 >= 0) v1 = v1.substring(0, dash1);
+        int dash2 = v2.indexOf('-');
+        if (dash2 >= 0) v2 = v2.substring(0, dash2);
         
         int idx1 = 0, idx2 = 0;
         
@@ -178,6 +225,32 @@ public:
     ESP32OTAPull &SetTargetFilename(const char *filename) { TargetFilename = filename; return *this; }
     
     ESP32OTAPull &AllowDowngrades(bool allow_downgrades) { DowngradesAllowed = allow_downgrades; return *this; }
+    // Beta devices also accept "x.y.z-suffix" versions. Default (false) is production only.
+    // The setting is persisted in the "ota_prefs" namespace and survives reboots.
+    ESP32OTAPull &SetBetaChannel(bool beta = true)
+    {
+        if (isBeta() != beta) {
+            Preferences prefs;
+            prefs.begin("ota_prefs", false);
+            prefs.putBool("beta", beta);
+            prefs.end();
+            BetaChannel = beta;
+        }
+        return *this;
+    }
+
+    // True if this device is configured for beta firmware (loaded from flash on first use)
+    bool isBeta()
+    {
+        if (!BetaLoaded) {
+            Preferences prefs;
+            prefs.begin("ota_prefs", false); // read-write so the namespace is created if missing
+            BetaChannel = prefs.getBool("beta", false);
+            prefs.end();
+            BetaLoaded = true;
+        }
+        return BetaChannel;
+    }
     ESP32OTAPull &SetCallback(void (*callback)(int offset, int totallength)) { Callback = callback; return *this; }
     void EnableSerialDebug() { SerialDebug = true; }
 
@@ -318,34 +391,52 @@ public:
 
             String _TargetName = TargetFilename.isEmpty() ? "" : TargetFilename;
 
-            // Grab the global version from the root of the JSON document
+            // Production lives at the JSON root; the optional "beta" object is only read by beta devices
             CVersion = doc["version"].isNull() ? "" : (const char *)doc["version"];
 
-            for (auto firmware : doc["firmwares"].as<JsonArray>())
-            {
-                String FName = firmware["name"].isNull() ? "" : (const char *)firmware["name"];
+            String selectedVersion = "";
+            JsonObject sections[2] = { doc.as<JsonObject>(), isBeta() ? doc["beta"].as<JsonObject>() : JsonObject() };
 
-                // Check for an EXACT match between the JSON name and your target name
-                if (!_TargetName.isEmpty() && FName == _TargetName)
+            for (int s = 0; s < 2; s++)
+            {
+                JsonObject section = sections[s];
+                if (section.isNull()) continue;
+                if (s == 1 && section["version"].isNull()) continue; // beta needs an explicit version
+                if (s == 1 && versionSuffix((const char *)section["version"]).isEmpty()) {
+                    if (SerialDebug) Serial.println("OTA: Ignoring beta section: version has no '-suffix' (e.g. 3.2.1-beta1).");
+                    continue;
+                }
+
+                String sectionVersion = section["version"].isNull() ? "" : (const char *)section["version"];
+
+                for (auto firmware : section["firmwares"].as<JsonArray>())
                 {
+                    String FName = firmware["name"].isNull() ? "" : (const char *)firmware["name"];
+
+                    // Check for an EXACT match between the JSON name and your target name
+                    if (_TargetName.isEmpty() || FName != _TargetName) continue;
+
                     foundProfile = true;
 
-                    if (CVersion == badVer && !badVer.isEmpty()) {
+                    if (sectionVersion == badVer && !badVer.isEmpty()) {
                         if (SerialDebug) Serial.println("Skipping version: previously failed/reverted.");
-                        skippedBadVersion = true; // <-- NEW: Flag that we hit the bad version
-                        continue; 
+                        skippedBadVersion = true;
+                        break;
                     }
 
-                    int versionCmp = compareVersions(CVersion, String(CurrentVersion));
+                    if (!shouldInstall(sectionVersion, String(CurrentVersion))) break;
 
-                    if (CVersion.isEmpty() || versionCmp > 0 || (DowngradesAllowed && versionCmp != 0)) {
-                        targetURL = firmware["url"].isNull() ? "" : (const char *)firmware["url"];
-                        targetMD5 = firmware["md5"].isNull() ? "" : (const char *)firmware["md5"];
-                        shouldUpdate = true;
-                        break; 
-                    }
+                    // If both channels qualify, take the higher number; ties go to production (checked first)
+                    if (shouldUpdate && !selectedVersion.isEmpty() && compareVersions(sectionVersion, selectedVersion) <= 0) break;
+
+                    targetURL = firmware["url"].isNull() ? "" : (const char *)firmware["url"];
+                    targetMD5 = firmware["md5"].isNull() ? "" : (const char *)firmware["md5"];
+                    selectedVersion = sectionVersion;
+                    shouldUpdate = true;
+                    break;
                 }
             }
+            if (shouldUpdate) CVersion = selectedVersion;
         } // End Scope Block
 
         if (!foundProfile) return NO_UPDATE_PROFILE_FOUND;

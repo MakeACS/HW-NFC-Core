@@ -42,6 +42,7 @@ void setNewPassword(String answer);
 void setNewHint(String answer);
 void factoryReset1(bool pressed);
 void factoryReset2(bool pressed);
+void setOTAMode(String answer);
 void enableOTA(String answer);
 void setOTAURL(String answer);
 void setTimezone(String answer);
@@ -188,8 +189,17 @@ void startESPConfig(){
     config.addInformation("Hardware", "warn", "System", "Warning", "[bad]This device is running a reduced configuration interface. Most settings will be unavailable!");
     #endif
     //Firmware Information
-    #ifndef REDUCED_CONFIG
     config.addInformation("Firmware", "version", "System", "Firmware Version", FIRMWARE_VERSION);
+    String betaMode = "";
+    String betaOption = "";    if(ota.isBeta()){
+        betaMode = "Beta pre-release (if available)";
+        betaOption = "Beta";
+    } else{
+        betaMode = "Production release";
+        betaOption = "Production (Recommended)";
+    }
+    config.addInformation("OTA", "beta", "System", "Firmware Mode", betaMode);
+    #ifndef REDUCED_CONFIG
     config.addInformation("Firmware", "source", "System", "Firmware Source", WEBSITE);
     config.addInformation("Firmware", "last-ota", "System", "Last OTA Result", "Loading...", "The result the last time the system checked for an OTA.");
     config.addInformation("Firmware", "secure-boot", "System", "Secure Boot", "[bad]DISABLED", "Secure boot ensures only valid firmware is run on the device."); //TODO Implement
@@ -224,6 +234,7 @@ void startESPConfig(){
     config.addLatchCommand("Factory Reset", "reset", "System", "Factory Reset", factoryReset1, "DANGER: a factory reset will wipe all data from the device! Are you sure you want to proceed?", "Resets the device to its original factory state", false, true, false);
     config.addButtonCommand("Factory Reset", "confirm", "System", "Confirm Factory Reset", factoryReset2, "FINAL WARNING: once you confirm, the device will immediately be wiped! There is no undo!", "", true, true, true);
     //OTA Settings
+    config.addChoiceQuestion("OTA", "setBeta", "System", "Choose Firmware Release Mode", betaOption, {"Beta","Production (Recommended)"}, setOTAMode, true);
     #ifndef REDUCED_CONFIG
     config.addChoiceQuestion("OTA", "enable", "System", "Enable Automatic OTA at Startup?", "Enabled", {"Enabled", "Disabled"}, enableOTA, true);
     config.addStringQuestion("OTA", "url", "System", "Set OTA JSON URL", "https://github.com/MakeACS/HW-NFC-Core/blob/main/Firmware/OTADirectory.json", 128, setOTAURL, true);
@@ -586,6 +597,18 @@ void factoryReset2(bool pressed){
         config.updateCommand("Factory Reset", "confirm", "[bad]ALERT: Factory Reset in Progress!");
         config.updateCommandAvailability("Factory Reset", "reset", true);
         //TODO actually factory reset here.
+    }
+}
+void setOTAMode(String answer){
+    //Set the OTA mode: "Beta","Production (Recommended)"
+    if(answer.equalsIgnoreCase("beta")){
+        //Enable beta mode
+        ota.SetBetaChannel(true);
+        config.updateQuestion("OTA", "setBeta", "[bad]WARNING: Device will boot to BETA mode on next restart!");
+    } else{
+        //Disable beta mode
+        ota.SetBetaChannel(false);
+        config.updateQuestion("OTA", "setBeta", "Device will use production firmware on next restart.");
     }
 }
 void enableOTA(String answer){

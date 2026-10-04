@@ -46,44 +46,85 @@ jobs:
           
           REPO="${{ github.repository }}"
           TAG="${{ github.ref_name }}"
+          IS_PRERELEASE="${{ github.event.release.prerelease }}"
           BASE_URL="https://github.com/$REPO/releases/download/$TAG"
           
-          # Initialize the base JSON structure
-          jq -n --arg version "$TAG" '{version: $version, firmwares: []}' > release_assets/OTADirectory.json
+          # 1. Safety Check: Tag format vs GitHub Release type
+          if [[ "$TAG" == *"-"* ]]; then
+            TAG_HAS_DASH=true
+          else
+            TAG_HAS_DASH=false
+          fi
+
+          if [ "$IS_PRERELEASE" = "true" ] && [ "$TAG_HAS_DASH" = "false" ]; then
+            echo "::error::Release is marked as 'Pre-release', but tag '$TAG' lacks a dash. Expected format like '3.2.1-beta1'."
+            exit 1
+          fi
+
+          if [ "$IS_PRERELEASE" = "false" ] && [ "$TAG_HAS_DASH" = "true" ]; then
+            echo "::error::Release is marked as 'Latest' (production), but tag '$TAG' contains a dash. Expected format like '3.12.9'."
+            exit 1
+          fi
+
+          # 2. Accumulate firmware entries for this release
+          FIRMWARES_JSON="[]"
           
           for env_dir in .pio/build/*/; do
             if [ -d "$env_dir" ]; then
               env_name=$(basename "$env_dir")
               
               if [ -f "$env_dir/firmware.bin" ]; then
-                # 1. Handle the .bin file
+                # Handle .bin file
                 new_name="firmware_${env_name}.bin"
                 filepath="release_assets/${new_name}"
                 
                 cp "$env_dir/firmware.bin" "$filepath"
                 echo "Prepared ${new_name} for upload"
                 
-                # 2. Handle the .elf file for core dumps
+                # Handle .elf file
                 if [ -f "$env_dir/firmware.elf" ]; then
                   elf_name="firmware_${env_name}.elf"
                   cp "$env_dir/firmware.elf" "release_assets/${elf_name}"
                   echo "Prepared ${elf_name} for upload"
                 fi
                 
-                # 3. Calculate MD5 and update JSON (using the .bin file)
+                # Calculate MD5 and accumulate JSON entry
                 md5_hash=$(md5sum "$filepath" | awk '{print $1}')
                 file_url="${BASE_URL}/${new_name}"
                 
-                # Append this firmware's data into OTADirectory.json
-                jq --arg name "$new_name" \
-                   --arg url "$file_url" \
-                   --arg md5 "$md5_hash" \
-                   '.firmwares += [{"name": $name, "url": $url, "md5": $md5}]' \
-                   release_assets/OTADirectory.json > release_assets/tmp.json && mv release_assets/tmp.json release_assets/OTADirectory.json
+                FIRMWARES_JSON=$(echo "$FIRMWARES_JSON" | jq \
+                  --arg name "$new_name" \
+                  --arg url "$file_url" \
+                  --arg md5 "$md5_hash" \
+                  '. += [{"name": $name, "url": $url, "md5": $md5}]')
               fi
             fi
           done
-          
+
+          # 3. Retrieve existing OTADirectory.json (from origin/main if present, else local or empty)
+          if git show origin/main:Firmware/OTADirectory.json > /dev/null 2>&1; then
+            EXISTING_JSON=$(git show origin/main:Firmware/OTADirectory.json)
+          elif [ -f "OTADirectory.json" ]; then
+            EXISTING_JSON=$(cat OTADirectory.json)
+          else
+            EXISTING_JSON="{}"
+          fi
+
+          # 4. Update manifest according to release type
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            echo "Updating beta block in OTADirectory.json..."
+            echo "$EXISTING_JSON" | jq \
+              --arg version "$TAG" \
+              --argjson firmwares "$FIRMWARES_JSON" \
+              '.beta = {version: $version, firmwares: $firmwares}' > release_assets/OTADirectory.json
+          else
+            echo "Updating production block in OTADirectory.json..."
+            echo "$EXISTING_JSON" | jq \
+              --arg version "$TAG" \
+              --argjson firmwares "$FIRMWARES_JSON" \
+              '.version = $version | .firmwares = $firmwares' > release_assets/OTADirectory.json
+          fi
+
           cat release_assets/OTADirectory.json
 
       - name: Commit and Push Manifest and Version to Repository
@@ -92,8 +133,10 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
           git checkout main
+          git pull origin main --rebase || true
           
           cp release_assets/OTADirectory.json ./OTADirectory.json
+          echo "#define FIRMWARE_VERSION \"${{ github.ref_name }}\"" > src/version.h
           
           git add OTADirectory.json src/version.h
           git commit -m "Update OTA directory and version.h for release ${{ github.ref_name }} [skip ci]" || echo "No changes to commit"
@@ -102,7 +145,6 @@ jobs:
       - name: Upload Binaries and ELFs to Release
         uses: softprops/action-gh-release@v2
         with:
-          # Upload both .bin and .elf files to the GitHub Release
           files: |
             Firmware/release_assets/*.bin
             Firmware/release_assets/*.elf

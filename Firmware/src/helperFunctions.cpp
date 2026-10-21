@@ -11,6 +11,10 @@ TaggedSerial<decltype(::Serial)> helperSerial(::Serial, "[main] ");
 
 #define Serial helperSerial
 
+#if CORE_HAS_ETHERNET
+void printEthernetStatus(const char *tag);
+#endif
+
 String getCertificateCommonName() {
   mbedtls_x509_crt certificate;
   mbedtls_x509_crt_init(&certificate);
@@ -130,6 +134,7 @@ void connectNetwork(){
   byte TLSRetryCount = 0; //Tracks how many failed TLS attempts we had in a row.
   uint64_t connectAttemptStart = millis64(); //Tracks how long we've been struggling to reconnect.
   bool radioResetDone = false; //Tracks whether we've already power-cycled the WiFi radio this outage.
+  const NetworkState::Transport previousTransport = networkState.transport;
   retryNetwork:
 
 #ifndef REDUCED_CONFIG
@@ -169,10 +174,15 @@ config.updateInformation("Network", "state", "[time]: Attempting to reconnect...
 
   #if CORE_HAS_ETHERNET
   if(ETH.hasIP()){
-    networkState.transport = NetworkState::Transport::Ethernet;
-    Serial.println(F("Using Ethernet connection."));
-    useEthernet = true;
-    //TODO the rest of the ethernet connect code, if any?
+    if(ETH.setDefault()){
+      networkState.transport = NetworkState::Transport::Ethernet;
+      Serial.println(F("Using Ethernet connection."));
+      useEthernet = true;
+    } else{
+      Serial.println(F("Could not set Ethernet as the default network interface; falling back to WiFi."));
+    }
+  } else{
+    printEthernetStatus("no IP, using WiFi");
   }
   #endif
   
@@ -180,17 +190,28 @@ config.updateInformation("Network", "state", "[time]: Attempting to reconnect...
   if(!useEthernet){
     //Using WIFI:
     networkState.transport = NetworkState::Transport::WiFi;
-    //Should not need to restart the WiFi.
-    //WiFi.mode(WIFI_STA);
-    //WiFi.begin(networkConfiguration.wifiSsid, networkConfiguration.wifiPassword);
     if(WiFi.status() != WL_CONNECTED){
       wifiIssue = true;
-      WiFi.reconnect(); //Force a manual connect attempt
+      WiFi.mode(WIFI_STA);
+      WiFi.begin(networkConfiguration.wifiSsid, networkConfiguration.wifiPassword);
+      WiFi.setSleep(false);
+      WiFi.setAutoReconnect(true);
       Serial.println(F("No WiFi? Waiting for reconnect"));
       unsigned long long WiFiTime = millis64() + 15000;
+      unsigned long long nextDot = 0;
       while(WiFi.status() != WL_CONNECTED){
-        Serial.println(".");
-        delay(2000);
+        #if CORE_HAS_ETHERNET
+        //Ethernet may get its DHCP lease while we wait for WiFi, so keep checking for it.
+        if(ETH.hasIP()){
+          Serial.println(F("Ethernet came up while waiting for WiFi."));
+          goto retryNetwork;
+        }
+        #endif
+        if(millis64() >= nextDot){
+          Serial.println(".");
+          nextDot = millis64() + 2000;
+        }
+        delay(100);
         if(WiFiTime <= millis64()){
           Serial.println(F("Failed to connect to WiFi! Retrying..."));
           goto retryNetwork;
@@ -200,6 +221,17 @@ config.updateInformation("Network", "state", "[time]: Attempting to reconnect...
     } else{
       Serial.println(F("Already had WiFi connection, skipping to websocket connection."));
     }
+    if(!WiFi.STA.setDefault()){
+      Serial.println(F("Could not set WiFi as the default network interface; retrying."));
+      delay(1000);
+      goto retryNetwork;
+    }
+  }
+
+  if(previousTransport != NetworkState::Transport::None && previousTransport != networkState.transport){
+    Serial.println(F("Network interface changed; reconnecting sockets on the selected interface."));
+    mqtt.disconnect();
+    socket.disconnect();
   }
 
   //Next, check our websocket connection:
@@ -348,17 +380,11 @@ config.updateInformation("Network", "state", "[time]: Attempting to reconnect...
   JsonDocument NetConnect;
   NetConnect["status"] = "connected";
   //Check the interface in use
-  bool usingWifi = false;
+  bool usingWifi = !useEthernet;
   #if CORE_HAS_ETHERNET
-  if(ETH.hasIP()){
-    NetConnect["interface"] = "ethernet";
-    //TODO add ethernet IP to payload
-  } else{
-    NetConnect["interface"] = "wifi";
-  }
+  NetConnect["interface"] = useEthernet ? "ethernet" : "wifi";
   #else
     NetConnect["interface"] = "wifi";
-    usingWifi = true;
   #endif
   //If we are using wifi, add more info;
   if(usingWifi){
@@ -399,7 +425,12 @@ config.updateInformation("Network", "state", "[time]: Attempting to reconnect...
   #ifndef REDUCED_CONFIG
   //Update the config frontend with our network information now that we are connected.
   config.updateInformation("Network", "state", "Connected at [time]");
-  config.updateInformation("Network", "local-ip", WiFi.localIP().toString());
+  #if CORE_HAS_ETHERNET
+  config.updateInformation("Network", "eth-ip", useEthernet ? ETH.localIP().toString() : "Not in use");
+  config.updateInformation("Network", "wifi-ip", !useEthernet ? WiFi.localIP().toString() : "Not in use");
+  #else
+  config.updateInformation("Network", "wifi-ip", WiFi.localIP().toString());
+  #endif
   String reasonConfig = "Unknown";
   if(connectBlame == "WiFi"){
     //Blame the wifi with additional info;
@@ -408,8 +439,10 @@ config.updateInformation("Network", "state", "[time]: Attempting to reconnect...
     reasonConfig = connectBlame;
   }
   config.updateInformation("Network", "disconnect-reason", reasonConfig);
-  config.updateInformation("WiFi", "bssid", WiFi.BSSIDstr());
-  config.updateInformation("WiFi", "wifi-channel", String(WiFi.channel()));
+  if(usingWifi){
+    config.updateInformation("WiFi", "bssid", WiFi.BSSIDstr());
+    config.updateInformation("WiFi", "wifi-channel", String(WiFi.channel()));
+  }
   #endif
 }
 
@@ -447,28 +480,88 @@ void setW5500MacAddress(const uint8_t macAddress[6]) {
   SPI.endTransaction();
 }
 
+void printEthernetStatus(const char *tag) {
+  Serial.printf("[eth] %s: started=%d link=%d connected=%d hasIP=%d speed=%uMbps fullDuplex=%d autoneg=%d\n",
+    tag, ETH.started(), ETH.linkUp(), ETH.connected(), ETH.hasIP(), (unsigned)ETH.linkSpeed(), ETH.fullDuplex(), ETH.autoNegotiation());
+  Serial.printf("[eth] %s: mac=%s ip=%s gw=%s mask=%s dns=%s\n",
+    tag, ETH.macAddress().c_str(), ETH.localIP().toString().c_str(), ETH.gatewayIP().toString().c_str(),
+    ETH.subnetMask().toString().c_str(), ETH.dnsIP().toString().c_str());
+}
+
+void onEthernetEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_ETH_START: Serial.println(F("[eth] event: driver started")); break;
+    case ARDUINO_EVENT_ETH_CONNECTED: Serial.println(F("[eth] event: link up (cable connected)")); break;
+    case ARDUINO_EVENT_ETH_GOT_IP:
+      Serial.printf("[eth] event: got IP %s\n", IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
+      break;
+    case ARDUINO_EVENT_ETH_LOST_IP: Serial.println(F("[eth] event: lost IP")); break;
+    case ARDUINO_EVENT_ETH_DISCONNECTED: Serial.println(F("[eth] event: link down (no cable or no partner)")); break;
+    case ARDUINO_EVENT_ETH_STOP: Serial.println(F("[eth] event: driver stopped")); break;
+    default: break;
+  }
+}
+
 bool initializeEthernet() {
+  Serial.printf("[eth] Initializing W5500: CS=%d INT=%d RST=%d SCK=%d MISO=%d MOSI=%d\n",
+    PIN_ETH_CS, PIN_ETH_INT, PIN_ETH_RST, PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI);
   uint8_t ethernetMac[6];
   deriveEthernetMac(ethernetMac);
+  Serial.printf("[eth] Expected MAC: %s\n", getEthernetMacAddress().c_str());
 
+  WiFi.onEvent(onEthernetEvent);
+
+  //The ETH driver resets the chip and reads its version register (must be 0x04), so a failure here
+  //means the SPI wiring, reset line or chip select is wrong, or the chip is not powered.
+  const unsigned long long beginStart = millis64();
   if (!ETH.begin(ETH_PHY_W5500, 1, PIN_ETH_CS, PIN_ETH_INT, PIN_ETH_RST, SPI)) {
-    Serial.println(F("W5500 initialization failed; using WiFi."));
+    Serial.println(F("[eth] ETH.begin() failed (no response from W5500 over SPI, or driver setup error); using WiFi."));
     return false;
   }
-
+  Serial.printf("[eth] ETH.begin() OK in %ums; W5500 responded over SPI.\n", (unsigned)(millis64() - beginStart));
   setW5500MacAddress(ethernetMac);
-  const unsigned long long ethernetDeadline = millis64() + 5000;
+  //ETH.begin() gave the network stack its own MAC, which is also the DHCP client address. Make it match the chip,
+  //otherwise the chip filters out frames addressed to the stack's MAC and DHCP replies never arrive.
+  const esp_err_t macResult = esp_netif_set_mac(ETH.netif(), ethernetMac);
+  if (macResult != ESP_OK) {
+    Serial.printf("[eth] esp_netif_set_mac failed: %s\n", esp_err_to_name(macResult));
+  }
+  printEthernetStatus("after begin"); //mac= should equal the expected MAC above
+
+  //Wait for link first (fails fast with no cable), then for DHCP.
+  const unsigned long long linkDeadline = millis64() + 3000;
+  while (!ETH.linkUp() && millis64() < linkDeadline) {
+    delay(50);
+  }
+  if (!ETH.linkUp()) {
+    printEthernetStatus("no link");
+    Serial.println(F("[eth] No Ethernet link after 3s (cable unplugged or no switch/router?); using WiFi."));
+    return false;
+  }
+  Serial.printf("[eth] Link up after %ums, waiting for DHCP...\n", (unsigned)(millis64() - beginStart));
+
+  const unsigned long long ethernetDeadline = millis64() + 10000;
+  unsigned long long nextStatus = millis64() + 2000;
   while (!ETH.hasIP() && millis64() < ethernetDeadline) {
     delay(50);
+    if (millis64() >= nextStatus) {
+      nextStatus = millis64() + 2000;
+      printEthernetStatus("waiting for DHCP");
+    }
   }
 
   if (!ETH.hasIP()) {
-    Serial.println(F("W5500 has no IP address; using WiFi."));
+    printEthernetStatus("no IP");
+    Serial.println(F("[eth] Link is up but no DHCP lease within 10s (DHCP server unreachable, or frames not received); using WiFi."));
     return false;
   }
 
-  Serial.print(F("W5500 IP address: "));
-  Serial.println(ETH.localIP());
+  if (!ETH.setDefault()) {
+    Serial.println(F("Could not set W5500 as the default network interface; using WiFi."));
+    return false;
+  }
+
+  printEthernetStatus("ready");
   return true;
 }
 

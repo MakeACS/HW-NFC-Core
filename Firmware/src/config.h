@@ -61,7 +61,10 @@ void startESPConfig(){
     //Core Network Information
     #ifndef REDUCED_CONFIG
     config.addInformation("Network","state","Network","State","Loading...");
-    config.addInformation("Network", "local-ip", "Network", "Local IP", "Loading...");
+    #if CORE_HAS_ETHERNET
+    config.addInformation("Network", "eth-ip", "Network", "Ethernet IP", "Loading...");
+    #endif
+    config.addInformation("Network", "wifi-ip", "Network", "WiFi IP", "Loading...");
     config.addInformation("Network","disconnect-reason", "Network", "Disconnect Reason", "Loading...");
     config.addInformation("Network", "net-interface", "Network", "Interface", "Wi-Fi"); //Static placeholder; active-interface reporting is not wired to this field.
     //Core WiFi Information

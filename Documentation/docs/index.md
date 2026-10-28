@@ -1,8 +1,8 @@
 ---
-icon: lucide/arrow-big-right
+icon: lucide/book-open
 ---
 
-# Home
+# 0: Introduction
 
 !!! warning
     Documentation still in development, expect dead or unpopulated pages!
